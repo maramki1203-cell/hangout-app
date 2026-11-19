@@ -8,6 +8,7 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const server = http.createServer(app);
@@ -30,34 +31,27 @@ const USERS = {
 };
 
 // ============================================================
-//  In-memory data stores
+//  PERSISTENT DATA STORAGE (Saves to data.json so chats,
+//  leaderboards, and gallery NEVER evaporate on restarts/updates!)
 // ============================================================
-const chatRooms = [];        // { id, name, members[], messages[] }
-const callHistory = [];      // { id, caller, participants[], startedAt, endedAt }
-const activeCalls = {};      // callId -> { id, caller, participants[], peers[] }
-const onlineUsers = {};      // username -> socket.id
-let nextRoomId = 1;
-let nextCallId = 1;
+const DATA_FILE = path.join(__dirname, 'data.json');
 
-// Leaderboard store for top 5 scores
-const leaderboards = {
-  apple: [
-    { username: 'bang', score: 38, date: Date.now() - 3600000 },
-    { username: '시로', score: 27, date: Date.now() - 7200000 },
-  ],
-  flappy: [
-    { username: 'bang', score: 12, date: Date.now() - 3600000 },
-    { username: '미티', score: 8, date: Date.now() - 7200000 },
-  ],
-  runner: [
-    { username: 'bang', score: 450, date: Date.now() - 3600000 },
-    { username: '즤', score: 320, date: Date.now() - 7200000 },
-  ],
+let chatRooms = [
+  {
+    id: 1,
+    name: 'General Hangout 💬',
+    members: ['bang', '시로', '미티', '즤'],
+    messages: [],
+    createdAt: Date.now(),
+    lastActivity: Date.now()
+  }
+];
+let callHistory = [];
+let leaderboards = {
+  apple: [],
+  flappy: [],
+  runner: [],
 };
-
-// ============================================================
-//  Gallery Data Store (Sections & Photos)
-// ============================================================
 let gallerySections = [
   {
     id: 1,
@@ -74,8 +68,56 @@ let gallerySections = [
     photos: []
   }
 ];
+let nextRoomId = 2;
+let nextCallId = 1;
 let nextSectionId = 3;
 let nextPhotoId = 1;
+
+function loadPersistentData() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      const raw = fs.readFileSync(DATA_FILE, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed.chatRooms)) chatRooms = parsed.chatRooms;
+      if (Array.isArray(parsed.callHistory)) callHistory = parsed.callHistory;
+      if (parsed.leaderboards && typeof parsed.leaderboards === 'object') leaderboards = parsed.leaderboards;
+      if (Array.isArray(parsed.gallerySections)) gallerySections = parsed.gallerySections;
+      if (parsed.nextRoomId) nextRoomId = parsed.nextRoomId;
+      if (parsed.nextCallId) nextCallId = parsed.nextCallId;
+      if (parsed.nextSectionId) nextSectionId = parsed.nextSectionId;
+      if (parsed.nextPhotoId) nextPhotoId = parsed.nextPhotoId;
+      console.log('📦 Loaded persistent data successfully from data.json');
+    } else {
+      savePersistentData();
+    }
+  } catch (err) {
+    console.error('Error loading data.json:', err);
+  }
+}
+
+function savePersistentData() {
+  try {
+    const payload = {
+      chatRooms,
+      callHistory,
+      leaderboards,
+      gallerySections,
+      nextRoomId,
+      nextCallId,
+      nextSectionId,
+      nextPhotoId,
+    };
+    fs.writeFileSync(DATA_FILE, JSON.stringify(payload, null, 2), 'utf8');
+  } catch (err) {
+    console.error('Error saving data.json:', err);
+  }
+}
+
+loadPersistentData();
+
+// In-memory runtime connection state
+const activeCalls = {};      // callId -> { id, caller, participants[], peers[] }
+const onlineUsers = {};      // username -> socket.id
 
 // ============================================================
 //  Gartic Phone Game Rooms
@@ -110,7 +152,6 @@ function handlePeerLeaveCall(callId, username) {
 
   call.peers = call.peers.filter(p => p !== username);
 
-  // If 1 or 0 peers left, end the call automatically!
   if (call.peers.length <= 1) {
     if (call.peers.length === 1) {
       const lonePeer = call.peers[0];
@@ -130,8 +171,8 @@ function handlePeerLeaveCall(callId, username) {
       endedAt: Date.now(),
     });
     delete activeCalls[callId];
+    savePersistentData();
   } else {
-    // Notify remaining peers
     call.peers.forEach(p => {
       if (onlineUsers[p]) {
         io.to(onlineUsers[p]).emit('peer-left', { callId, username });
@@ -153,7 +194,6 @@ io.on('connection', (socket) => {
       onlineUsers[username] = socket.id;
       callback({ success: true, username });
 
-      // Tell everyone the updated online list
       io.emit('online-users', Object.keys(onlineUsers));
       io.emit('all-users', Object.keys(USERS));
     } else {
@@ -161,7 +201,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ---------- Get all registered usernames ----------
   socket.on('get-all-users', (callback) => {
     callback(Object.keys(USERS));
   });
@@ -172,37 +211,42 @@ io.on('connection', (socket) => {
   });
 
   socket.on('submit-score', ({ game, score }, callback) => {
-    if (!currentUser || !leaderboards[game] || typeof score !== 'number') {
-      if (callback) callback({ success: false });
+    if (!currentUser || !leaderboards[game] || typeof score !== 'number' || score <= 0) {
+      if (callback) callback({ success: false, rank: null, score: score || 0 });
       return;
     }
     const list = leaderboards[game];
 
     // Find if user already has a score in this game
     const existingIndex = list.findIndex(item => item.username === currentUser);
+    let isBetter = false;
     if (existingIndex !== -1) {
       if (score > list[existingIndex].score) {
         list[existingIndex].score = score;
         list[existingIndex].date = Date.now();
+        isBetter = true;
       }
     } else {
       list.push({ username: currentUser, score, date: Date.now() });
+      isBetter = true;
     }
 
     // Sort descending and keep top 5
     list.sort((a, b) => b.score - a.score);
     if (list.length > 5) list.length = 5;
 
+    savePersistentData();
     io.emit('leaderboard-updated', { game, list });
 
-    // Calculate rank
-    const myRankIdx = list.findIndex(item => item.username === currentUser && item.score >= score);
-    const myRank = myRankIdx !== -1 ? myRankIdx + 1 : null;
+    // Calculate actual rank in top 5
+    const myRankIdx = list.findIndex(item => item.username === currentUser && item.score === score);
+    const myRank = (myRankIdx !== -1) ? myRankIdx + 1 : null;
 
     if (callback) {
       callback({
         success: true,
         rank: myRank,
+        isNewRecord: isBetter,
         topScore: list[0] ? list[0].score : score,
         score
       });
@@ -231,8 +275,21 @@ io.on('connection', (socket) => {
       photos: []
     };
     gallerySections.push(newSection);
+    savePersistentData();
     io.emit('gallery-updated', gallerySections);
     callback({ success: true, section: newSection });
+  });
+
+  // Only "bang" can delete sections!
+  socket.on('delete-gallery-section', ({ sectionId }, callback) => {
+    if (currentUser !== 'bang') {
+      if (callback) callback({ success: false, message: 'Only bang can delete sections!' });
+      return;
+    }
+    gallerySections = gallerySections.filter(s => s.id !== sectionId);
+    savePersistentData();
+    io.emit('gallery-updated', gallerySections);
+    if (callback) callback({ success: true });
   });
 
   // Anyone logged in can upload photos into existing sections!
@@ -251,7 +308,8 @@ io.on('connection', (socket) => {
       uploader: currentUser,
       timestamp: Date.now()
     };
-    sec.photos.unshift(photo); // newest photo first
+    sec.photos.unshift(photo);
+    savePersistentData();
     io.emit('gallery-updated', gallerySections);
     callback({ success: true, photo });
   });
@@ -267,6 +325,7 @@ io.on('connection', (socket) => {
 
     if (currentUser === 'bang' || photo.uploader === currentUser) {
       sec.photos = sec.photos.filter(p => p.id !== photoId);
+      savePersistentData();
       io.emit('gallery-updated', gallerySections);
       callback({ success: true });
     } else {
@@ -303,6 +362,8 @@ io.on('connection', (socket) => {
       lastActivity: Date.now(),
     };
     chatRooms.push(room);
+    savePersistentData();
+
     members.forEach(m => {
       if (onlineUsers[m]) {
         io.to(onlineUsers[m]).emit('room-created', {
@@ -340,8 +401,8 @@ io.on('connection', (socket) => {
     };
     room.messages.push(msg);
     room.lastActivity = Date.now();
+    savePersistentData();
 
-    // Send to all online members of this room
     room.members.forEach(m => {
       if (onlineUsers[m]) {
         io.to(onlineUsers[m]).emit('new-message', { roomId, message: msg });
@@ -372,7 +433,7 @@ io.on('connection', (socket) => {
       startedAt: Date.now(),
     };
 
-    // Notify invited participants
+    // Notify invited participants with custom alert
     participants.forEach(p => {
       if (p !== currentUser && onlineUsers[p]) {
         io.to(onlineUsers[p]).emit('incoming-call', {
@@ -432,7 +493,7 @@ io.on('connection', (socket) => {
   });
 
   // ============================================================
-  //  GARTIC PHONE (Online Drawing & Guessing Telephone Game)
+  //  GARTIC PHONE
   // ============================================================
   function getGarticPublicState(room) {
     return {
@@ -502,7 +563,6 @@ io.on('connection', (socket) => {
 
     room.status = 'prompt';
     room.round = 1;
-    // Each round is an alternating draw or guess, up to players.length * 2
     room.totalRounds = Math.min(room.players.length * 2, 6);
     room.books = {};
     room.assignments = {};
@@ -614,7 +674,6 @@ io.on('connection', (socket) => {
       delete onlineUsers[currentUser];
       io.emit('online-users', Object.keys(onlineUsers));
 
-      // Leave any active calls
       Object.keys(activeCalls).forEach(callId => {
         const call = activeCalls[callId];
         if (call.peers.includes(currentUser)) {
@@ -622,7 +681,6 @@ io.on('connection', (socket) => {
         }
       });
 
-      // Leave any Gartic rooms
       Object.keys(garticRooms).forEach(roomId => {
         const room = garticRooms[roomId];
         if (room.players.includes(currentUser)) {

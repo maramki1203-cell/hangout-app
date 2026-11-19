@@ -1,0 +1,43 @@
+{
+  "chatRooms": [
+    {
+      "id": 1,
+      "name": "General Hangout 💬",
+      "members": [
+        "bang",
+        "시로",
+        "미티",
+        "즤"
+      ],
+      "messages": [],
+      "createdAt": 1700000000000,
+      "lastActivity": 1700000000000
+    }
+  ],
+  "callHistory": [],
+  "leaderboards": {
+    "apple": [],
+    "flappy": [],
+    "runner": []
+  },
+  "gallerySections": [
+    {
+      "id": 1,
+      "name": "Hangout Memories 📸",
+      "createdBy": "bang",
+      "createdAt": 1700000000000,
+      "photos": []
+    },
+    {
+      "id": 2,
+      "name": "Funny Moments 😂",
+      "createdBy": "bang",
+      "createdAt": 1700000000000,
+      "photos": []
+    }
+  ],
+  "nextRoomId": 2,
+  "nextCallId": 1,
+  "nextSectionId": 3,
+  "nextPhotoId": 1
+}
