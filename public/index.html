@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hangout</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ==================== LOGIN SCREEN ==================== -->
+  <div id="login-screen">
+    <div class="login-box">
+      <h1>🏠 Hangout</h1>
+      <p>Sign in to continue</p>
+      <input type="text" id="login-user" placeholder="Username" autocomplete="off" />
+      <input type="password" id="login-pass" placeholder="Password" />
+      <button id="login-btn">Log In</button>
+      <p id="login-error" class="error"></p>
+    </div>
+  </div>
+
+  <!-- ==================== MAIN APP (hidden until login) ==================== -->
+  <div id="app" class="hidden">
+
+    <!-- Top bar -->
+    <header id="topbar">
+      <span class="logo">🏠 Hangout</span>
+      <span id="user-label"></span>
+      <button id="logout-btn">Log Out</button>
+    </header>
+
+    <!-- Navigation — the 3 main buttons -->
+    <nav id="main-nav">
+      <button class="nav-btn active" data-section="calls">📞 Calls</button>
+      <button class="nav-btn" data-section="chat">💬 Chat</button>
+      <button class="nav-btn" data-section="arcade">🕹️ Arcade</button>
+    </nav>
+
+    <!-- ============ CALLS SECTION ============ -->
+    <section id="calls-section" class="page active">
+      <div class="calls-container">
+        <!-- Left: recent calls -->
+        <div class="calls-left">
+          <h2>Recent Calls</h2>
+          <div id="call-history-list" class="list-scroll"></div>
+        </div>
+        <!-- Right: start call -->
+        <div class="calls-right">
+          <button id="start-call-btn" class="primary-btn">➕ Start a Call</button>
+          <div id="online-status">
+            <h3>Online Now</h3>
+            <div id="online-users-calls"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CHAT SECTION ============ -->
+    <section id="chat-section" class="page">
+      <div class="chat-container">
+        <!-- Left sidebar: rooms -->
+        <div class="chat-sidebar">
+          <button id="new-chat-btn" class="primary-btn">➕ New Chat</button>
+          <div id="room-list" class="list-scroll"></div>
+        </div>
+        <!-- Right: messages -->
+        <div class="chat-main">
+          <div id="chat-placeholder" class="placeholder">Select a chat to start messaging</div>
+          <div id="chat-active" class="hidden">
+            <div id="chat-header">
+              <span id="chat-room-name"></span>
+              <span id="chat-room-members" class="members-label"></span>
+              <button id="chat-call-btn" title="Start a call with everyone in this chat">📹 Call</button>
+            </div>
+            <div id="messages-area"></div>
+            <div id="message-bar">
+              <input type="text" id="message-input" placeholder="Type a message…" autocomplete="off" />
+              <button id="send-msg-btn">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ ARCADE SECTION ============ -->
+    <section id="arcade-section" class="page">
+      <div id="arcade-menu">
+        <h2>🕹️ Arcade</h2>
+        <div class="arcade-cards">
+          <div class="arcade-card" data-game="apple">
+            <div class="arcade-icon">🍎</div>
+            <h3>Fruit Box (사과 게임)</h3>
+            <p>Box apples that sum to 10 to clear them!</p>
+            <button class="primary-btn play-btn" data-game="apple">Play</button>
+          </div>
+          <div class="arcade-card" data-game="flappy">
+            <div class="arcade-icon">🐦</div>
+            <h3>Flappy Bird</h3>
+            <p>Fly through the pipes!</p>
+            <button class="primary-btn play-btn" data-game="flappy">Play</button>
+          </div>
+        </div>
+      </div>
+      <div id="game-area" class="hidden">
+        <div id="game-topbar">
+          <button id="back-to-arcade" class="secondary-btn">← Back to Arcade</button>
+          <button id="restart-game-top-btn" class="secondary-btn">🔄 Reset</button>
+          <span id="game-title"></span>
+          <span id="game-timer-display" class="hidden">⏱️ 120s</span>
+          <span id="game-score-display">Score: 0</span>
+        </div>
+        <canvas id="game-canvas" width="840" height="520"></canvas>
+        <div id="game-over-overlay" class="hidden">
+          <div class="game-over-box">
+            <h2 id="game-over-title">Game Over</h2>
+            <p id="game-over-msg">Final Score: <span id="final-score">0</span></p>
+            <div style="display: flex; gap: 12px; justify-content: center; margin-top: 16px;">
+              <button id="restart-game-btn" class="primary-btn">Play Again</button>
+              <button id="exit-game-btn" class="secondary-btn">Back to Arcade</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- ==================== CALL OVERLAY ==================== -->
+  <div id="call-overlay" class="hidden">
+    <div id="call-topbar">
+      <span id="call-status">In Call</span>
+      <button id="toggle-mic" class="call-ctrl-btn" title="Toggle Microphone">🎤</button>
+      <button id="toggle-cam" class="call-ctrl-btn" title="Toggle Camera">📷</button>
+      <button id="end-call-btn" class="call-ctrl-btn end">🔴 End</button>
+    </div>
+    <div id="videos-grid">
+      <div class="video-box" id="local-video-box">
+        <video id="local-video" autoplay muted playsinline></video>
+        <span class="video-label">You</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== MODALS ==================== -->
+
+  <!-- Modal: Select users for a call -->
+  <div id="modal-call" class="modal hidden">
+    <div class="modal-content">
+      <h2>Start a Call</h2>
+      <p>Select who to call:</p>
+      <div id="call-user-checkboxes" class="checkbox-list"></div>
+      <div class="modal-actions">
+        <button id="modal-call-cancel" class="secondary-btn">Cancel</button>
+        <button id="modal-call-start" class="primary-btn">Call</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Create chat room -->
+  <div id="modal-chat" class="modal hidden">
+    <div class="modal-content">
+      <h2>New Chat Room</h2>
+      <input type="text" id="new-room-name" placeholder="Room name" autocomplete="off" />
+      <p>Add members:</p>
+      <div id="chat-user-checkboxes" class="checkbox-list"></div>
+      <div class="modal-actions">
+        <button id="modal-chat-cancel" class="secondary-btn">Cancel</button>
+        <button id="modal-chat-create" class="primary-btn">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
