@@ -21,6 +21,15 @@ let activeGameCleanup = null;
 let currentLbTab = 'apple';
 let leaderboardsData = { apple: [], flappy: [], runner: [] };
 
+// Gallery State
+let galleryData = [];
+let selectedSectionId = null;
+
+// Gartic Phone State
+let currentGarticBooks = null;
+let lastGarticRound = -1;
+let lastGarticStatus = '';
+
 // ---- Robust WebRTC ICE Servers (STUN + OpenRelay TURN for remote NAT traversal) ----
 const ICE_SERVERS = {
   iceServers: [
@@ -75,9 +84,21 @@ function doLogin() {
       loginScreen.classList.add('hidden');
       appScreen.classList.remove('hidden');
       document.getElementById('user-label').textContent = `Logged in as ${myUsername}`;
+
+      // Show "New Section" button ONLY if logged in as bang!
+      const createSecBtn = document.getElementById('create-section-btn');
+      if (createSecBtn) {
+        if (myUsername === 'bang') {
+          createSecBtn.classList.remove('hidden');
+        } else {
+          createSecBtn.classList.add('hidden');
+        }
+      }
+
       loadRooms();
       loadCallHistory();
       loadLeaderboards();
+      loadGallery();
     } else {
       loginError.textContent = res.message;
     }
@@ -89,7 +110,7 @@ document.getElementById('logout-btn').addEventListener('click', () => {
 });
 
 // ============================================================
-//  NAVIGATION — 3 main tabs
+//  NAVIGATION — 4 main tabs (Calls, Chat, Gallery, Arcade)
 // ============================================================
 document.querySelectorAll('.nav-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -101,6 +122,10 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     // Stop game if switching away from arcade
     if (btn.dataset.section !== 'arcade') {
       stopActiveGame();
+    }
+
+    if (btn.dataset.section === 'gallery') {
+      loadGallery();
     }
   });
 });
@@ -178,9 +203,152 @@ function renderLeaderboard() {
   });
 }
 
-function submitGameScore(game, score) {
-  socket.emit('submit-score', { game, score });
+// ============================================================
+//  GALLERY (Sections & Community Photos)
+// ============================================================
+function loadGallery() {
+  socket.emit('get-gallery', (sections) => {
+    if (sections) {
+      renderGallery(sections);
+    }
+  });
 }
+
+socket.on('gallery-updated', (sections) => {
+  renderGallery(sections);
+});
+
+function renderGallery(sections) {
+  galleryData = sections;
+  const listContainer = document.getElementById('gallery-sections-list');
+  listContainer.innerHTML = '';
+
+  if (sections.length === 0) {
+    listContainer.innerHTML = '<p style="color:#667;font-size:13px;padding:12px;">No sections yet.</p>';
+  }
+
+  // Ensure an active section is selected
+  if (!selectedSectionId && sections.length > 0) {
+    selectedSectionId = sections[0].id;
+  }
+
+  sections.forEach(sec => {
+    const div = document.createElement('div');
+    div.className = 'section-item' + (sec.id === selectedSectionId ? ' selected' : '');
+    div.innerHTML = `
+      <span class="sec-name">${escHtml(sec.name)}</span>
+      <span class="sec-count">${sec.photos.length}</span>
+    `;
+    div.addEventListener('click', () => {
+      selectedSectionId = sec.id;
+      renderGallery(galleryData);
+    });
+    listContainer.appendChild(div);
+  });
+
+  // Render main photos grid
+  const currentSec = sections.find(s => s.id === selectedSectionId);
+  const nameEl = document.getElementById('gallery-current-section-name');
+  const metaEl = document.getElementById('gallery-section-meta');
+  const uploadBtn = document.getElementById('upload-photo-btn');
+  const grid = document.getElementById('gallery-photos-grid');
+
+  if (!currentSec) {
+    nameEl.textContent = 'Select a section';
+    metaEl.textContent = 'Choose a folder on the left';
+    uploadBtn.classList.add('hidden');
+    grid.innerHTML = '<div class="placeholder">Select a section on the left to see pictures!</div>';
+    return;
+  }
+
+  nameEl.textContent = currentSec.name;
+  metaEl.textContent = `Created by ${currentSec.createdBy} · ${currentSec.photos.length} photos`;
+  uploadBtn.classList.remove('hidden');
+
+  grid.innerHTML = '';
+  if (currentSec.photos.length === 0) {
+    grid.innerHTML = '<div class="placeholder" style="grid-column:1/-1;">No photos here yet! Click "📷 Upload Photo" to add one!</div>';
+    return;
+  }
+
+  currentSec.photos.forEach(photo => {
+    const card = document.createElement('div');
+    card.className = 'photo-card';
+
+    const canDelete = (myUsername === 'bang' || photo.uploader === myUsername);
+    const dateStr = new Date(photo.timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' });
+
+    card.innerHTML = `
+      <div class="photo-img-wrap" onclick="openImageViewer('${photo.url}')">
+        <img src="${photo.url}" alt="Gallery photo" />
+      </div>
+      <div class="photo-card-info">
+        <span class="photo-uploader">👤 ${escHtml(photo.uploader)}</span>
+        <span>${dateStr}</span>
+        ${canDelete ? `<button class="photo-delete-btn" title="Delete photo" onclick="deleteGalleryPhoto(${currentSec.id}, ${photo.id})">🗑️</button>` : ''}
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+}
+
+// Create new gallery section (Bang only)
+const createSecBtn = document.getElementById('create-section-btn');
+const modalSec = document.getElementById('modal-section');
+
+createSecBtn.addEventListener('click', () => {
+  if (myUsername !== 'bang') return;
+  document.getElementById('new-section-name').value = '';
+  modalSec.classList.remove('hidden');
+});
+
+document.getElementById('modal-section-cancel').addEventListener('click', () => {
+  modalSec.classList.add('hidden');
+});
+
+document.getElementById('modal-section-create').addEventListener('click', () => {
+  const name = document.getElementById('new-section-name').value.trim();
+  if (!name) { alert('Please enter a section name.'); return; }
+
+  socket.emit('create-gallery-section', { name }, (res) => {
+    if (res.success) {
+      modalSec.classList.add('hidden');
+      selectedSectionId = res.section.id;
+    } else {
+      alert(res.message || 'Error creating section.');
+    }
+  });
+});
+
+// Upload photo to gallery
+const galleryUploadBtn = document.getElementById('upload-photo-btn');
+const galleryFileInput = document.getElementById('gallery-file-input');
+
+galleryUploadBtn.addEventListener('click', () => {
+  if (!selectedSectionId) { alert('Select a section first.'); return; }
+  galleryFileInput.click();
+});
+
+galleryFileInput.addEventListener('change', () => {
+  const file = galleryFileInput.files[0];
+  if (file && selectedSectionId) {
+    compressImage(file, 1000, 0.8, (dataUrl) => {
+      socket.emit('upload-gallery-photo', {
+        sectionId: selectedSectionId,
+        image: dataUrl,
+      }, (res) => {
+        if (!res.success) alert(res.message || 'Error uploading photo.');
+      });
+    });
+    galleryFileInput.value = '';
+  }
+});
+
+window.deleteGalleryPhoto = function(sectionId, photoId) {
+  if (confirm('Delete this photo from the gallery?')) {
+    socket.emit('delete-gallery-photo', { sectionId, photoId });
+  }
+};
 
 // ============================================================
 //  CHAT — Rooms & Messages with Photo Upload
@@ -218,13 +386,11 @@ function openRoom(roomId, name, members) {
   document.getElementById('chat-room-name').textContent = name;
   document.getElementById('chat-room-members').textContent = members.join(', ');
 
-  // Highlight selected room
   document.querySelectorAll('.room-item').forEach(el => el.classList.remove('selected'));
   document.querySelectorAll('.room-item').forEach(el => {
     if (el.querySelector('.room-name').textContent === name) el.classList.add('selected');
   });
 
-  // Load messages
   socket.emit('get-messages', { roomId }, (msgs) => {
     const area = document.getElementById('messages-area');
     area.innerHTML = '';
@@ -250,7 +416,9 @@ function appendMessage(msg) {
 
   let textHtml = '';
   if (msg.text) {
-    textHtml = `<div class="msg-bubble">${escHtml(msg.text)}</div>`;
+    // Preserve line breaks for shared albums
+    const formattedText = escHtml(msg.text).replace(/\n/g, '<br/>');
+    textHtml = `<div class="msg-bubble">${formattedText}</div>`;
   }
 
   div.innerHTML = `
@@ -263,7 +431,7 @@ function appendMessage(msg) {
   area.scrollTop = area.scrollHeight;
 }
 
-// Send message (with Korean / CJK IME composition handling)
+// Send message (Korean IME composition safe!)
 const msgInput = document.getElementById('message-input');
 let isImeComposing = false;
 
@@ -279,7 +447,6 @@ document.getElementById('send-msg-btn').addEventListener('click', sendMessage);
 
 msgInput.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) {
-    // If Korean IME is actively composing a syllable, ignore Enter so it doesn't double send!
     if (e.isComposing || isImeComposing || e.keyCode === 229) {
       return;
     }
@@ -293,10 +460,8 @@ function sendMessage() {
   const text = input.value.trim();
   if (!text || !currentRoomId) return;
 
-  // Clear immediately
   input.value = '';
 
-  // Safety cleanup: in case macOS Korean IME dumps the last composed character right after Enter
   setTimeout(() => {
     if (input.value) {
       input.value = '';
@@ -306,7 +471,7 @@ function sendMessage() {
   socket.emit('send-message', { roomId: currentRoomId, text, image: null });
 }
 
-// Receive messages in real-time
+// Real-time messages
 socket.on('new-message', ({ roomId, message }) => {
   if (roomId === currentRoomId) {
     appendMessage(message);
@@ -326,32 +491,43 @@ chatImageBtn.addEventListener('click', () => {
 chatFileInput.addEventListener('change', () => {
   const file = chatFileInput.files[0];
   if (file && currentRoomId) {
-    processAndSendImage(file);
+    compressImage(file, 900, 0.8, (dataUrl) => {
+      socket.emit('send-message', {
+        roomId: currentRoomId,
+        text: '',
+        image: dataUrl,
+      });
+    });
     chatFileInput.value = '';
   }
 });
 
-// Clipboard Paste Support (Cmd+V / Ctrl+V to paste screenshot)
+// Clipboard Paste
 document.getElementById('message-input').addEventListener('paste', (e) => {
   if (!currentRoomId) return;
   const items = (e.clipboardData || e.originalEvent.clipboardData).items;
   for (const item of items) {
     if (item.type.indexOf('image') !== -1) {
       const file = item.getAsFile();
-      processAndSendImage(file);
+      compressImage(file, 900, 0.8, (dataUrl) => {
+        socket.emit('send-message', {
+          roomId: currentRoomId,
+          text: '',
+          image: dataUrl,
+        });
+      });
       e.preventDefault();
       break;
     }
   }
 });
 
-// Helper: Compress image to avoid massive payloads over WebSockets
-function processAndSendImage(file) {
+// Shared Image Compression Helper
+function compressImage(file, maxDim, quality, callback) {
   const reader = new FileReader();
   reader.onload = (e) => {
     const img = new Image();
     img.onload = () => {
-      const maxDim = 900;
       let w = img.width;
       let h = img.height;
       if (w > maxDim || h > maxDim) {
@@ -368,13 +544,7 @@ function processAndSendImage(file) {
       offCanvas.height = h;
       const oCtx = offCanvas.getContext('2d');
       oCtx.drawImage(img, 0, 0, w, h);
-      const dataUrl = offCanvas.toDataURL('image/jpeg', 0.8);
-
-      socket.emit('send-message', {
-        roomId: currentRoomId,
-        text: '',
-        image: dataUrl,
-      });
+      callback(offCanvas.toDataURL('image/jpeg', quality));
     };
     img.src = e.target.result;
   };
@@ -395,7 +565,7 @@ document.getElementById('image-viewer-modal').addEventListener('click', (e) => {
   }
 });
 
-// ---- New Chat Modal ----
+// New Chat Modal
 document.getElementById('new-chat-btn').addEventListener('click', () => {
   socket.emit('get-all-users', (users) => {
     allUsers = users;
@@ -439,7 +609,7 @@ document.getElementById('chat-call-btn').addEventListener('click', () => {
 });
 
 // ============================================================
-//  CALLS & WEBRTC (Reliable NAT Traversal + Auto End on 1 Peer)
+//  CALLS & WEBRTC
 // ============================================================
 function loadCallHistory() {
   socket.emit('get-call-history', (history) => {
@@ -466,7 +636,6 @@ function loadCallHistory() {
   });
 }
 
-// Start Call Modal
 document.getElementById('start-call-btn').addEventListener('click', () => {
   socket.emit('get-all-users', (users) => {
     allUsers = users;
@@ -502,7 +671,6 @@ socket.on('incoming-call', ({ callId, caller }) => {
   }
 });
 
-// Automatic call termination when only 1 user remains
 socket.on('call-ended-auto', ({ message }) => {
   alert(message || 'Everyone else has left the call. Call ended.');
   endCall();
@@ -512,13 +680,13 @@ async function startCall(participants) {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
   } catch (err) {
-    alert('Could not access camera/microphone. Please allow camera & microphone permissions in your browser.');
+    alert('Could not access camera/microphone. Please allow camera & microphone permissions.');
     return;
   }
 
   const localVideo = document.getElementById('local-video');
   localVideo.srcObject = localStream;
-  localVideo.muted = true; // Avoid feedback
+  localVideo.muted = true;
   localVideo.play().catch(e => console.warn(e));
 
   document.getElementById('call-overlay').classList.remove('hidden');
@@ -554,9 +722,6 @@ async function joinCall(callId) {
   socket.emit('join-call', { callId }, (res) => {
     if (res.success) {
       document.getElementById('call-status').textContent = `In Call`;
-      // New joiner creates peer connections with isInitiator = false.
-      // Existing peers will receive 'peer-joined' and send the offer to the newcomer.
-      // This completely prevents WebRTC glare!
       res.peers.forEach(peer => {
         createPeerConnection(peer, false);
       });
@@ -574,14 +739,12 @@ function createPeerConnection(peerUsername, isInitiator) {
   peerConnections[peerUsername] = pc;
   iceCandidateQueue[peerUsername] = [];
 
-  // Add all local audio & video tracks
   if (localStream) {
     localStream.getTracks().forEach(track => {
       pc.addTrack(track, localStream);
     });
   }
 
-  // Handle remote video and audio streams
   pc.ontrack = (event) => {
     let videoBox = document.getElementById('video-' + peerUsername);
     if (!videoBox) {
@@ -596,12 +759,11 @@ function createPeerConnection(peerUsername, isInitiator) {
     }
     const remoteVideo = videoBox.querySelector('video');
     remoteVideo.srcObject = event.streams[0];
-    remoteVideo.muted = false; // ensure remote audio is unmuted!
+    remoteVideo.muted = false;
     remoteVideo.play().catch(e => console.warn('Autoplay prevented:', e));
     document.getElementById('call-status').textContent = `In Call`;
   };
 
-  // ICE candidates
   pc.onicecandidate = (event) => {
     if (event.candidate) {
       socket.emit('webrtc-ice-candidate', {
@@ -618,7 +780,6 @@ function createPeerConnection(peerUsername, isInitiator) {
     }
   };
 
-  // Existing peer creates offer to new joiner
   if (isInitiator) {
     pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
       .then(offer => pc.setLocalDescription(offer))
@@ -633,13 +794,11 @@ function createPeerConnection(peerUsername, isInitiator) {
   }
 }
 
-// Receive offer from existing peer
 socket.on('webrtc-offer', async ({ callId, from, offer }) => {
   createPeerConnection(from, false);
   const pc = peerConnections[from];
   try {
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    // Drain queued ICE candidates
     if (iceCandidateQueue[from] && iceCandidateQueue[from].length > 0) {
       for (const cand of iceCandidateQueue[from]) {
         await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => console.warn(e));
@@ -654,13 +813,11 @@ socket.on('webrtc-offer', async ({ callId, from, offer }) => {
   }
 });
 
-// Receive answer
 socket.on('webrtc-answer', async ({ from, answer }) => {
   const pc = peerConnections[from];
   if (pc) {
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
-      // Drain queued ICE candidates
       if (iceCandidateQueue[from] && iceCandidateQueue[from].length > 0) {
         for (const cand of iceCandidateQueue[from]) {
           await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => console.warn(e));
@@ -673,7 +830,6 @@ socket.on('webrtc-answer', async ({ from, answer }) => {
   }
 });
 
-// Receive ICE candidate with buffering
 socket.on('webrtc-ice-candidate', async ({ from, candidate }) => {
   const pc = peerConnections[from];
   if (pc && pc.remoteDescription && pc.remoteDescription.type) {
@@ -688,14 +844,12 @@ socket.on('webrtc-ice-candidate', async ({ from, candidate }) => {
   }
 });
 
-// A new peer joined the call -> existing peers initiate the offer
 socket.on('peer-joined', ({ callId, username }) => {
   if (callId === currentCallId) {
     createPeerConnection(username, true);
   }
 });
 
-// A peer left
 socket.on('peer-left', ({ callId, username }) => {
   if (callId === currentCallId) {
     removePeer(username);
@@ -711,14 +865,12 @@ function removePeer(username) {
   const box = document.getElementById('video-' + username);
   if (box) box.remove();
 
-  // If no more peers in call, automatically end call!
   if (currentCallId && Object.keys(peerConnections).length === 0) {
     alert('Everyone else has left the call. Call ended.');
     endCall();
   }
 }
 
-// Controls
 document.getElementById('toggle-mic').addEventListener('click', () => {
   micEnabled = !micEnabled;
   if (localStream) {
@@ -746,12 +898,10 @@ function endCall() {
     socket.emit('leave-call', { callId: currentCallId });
   }
 
-  // Close all peer connections
   Object.keys(peerConnections).forEach(removePeer);
   peerConnections = {};
   iceCandidateQueue = {};
 
-  // Stop local media
   if (localStream) {
     localStream.getTracks().forEach(t => t.stop());
     localStream = null;
@@ -771,7 +921,6 @@ function endCall() {
 const canvas = document.getElementById('game-canvas');
 const ctx = canvas.getContext('2d');
 
-// ---- Web Audio API for arcade sounds ----
 let audioCtx = null;
 function getAudioContext() {
   if (!audioCtx) {
@@ -852,7 +1001,6 @@ function stopActiveGame() {
   }
 }
 
-// Arcade Navigation
 document.querySelectorAll('.play-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const game = btn.dataset.game;
@@ -880,16 +1028,20 @@ document.getElementById('back-to-arcade').addEventListener('click', () => {
   document.getElementById('game-area').classList.add('hidden');
   document.getElementById('game-over-overlay').classList.add('hidden');
   document.getElementById('arcade-menu').classList.remove('hidden');
+  loadLeaderboards();
 });
 
+// "Back to Arcade" button in Game Over Popup
 document.getElementById('exit-game-btn').addEventListener('click', () => {
   stopActiveGame();
   currentGame = null;
   document.getElementById('game-over-overlay').classList.add('hidden');
   document.getElementById('game-area').classList.add('hidden');
   document.getElementById('arcade-menu').classList.remove('hidden');
+  loadLeaderboards(); // ensures top 5 is fresh!
 });
 
+// "One More Round" button in Game Over Popup
 document.getElementById('restart-game-btn').addEventListener('click', () => {
   document.getElementById('game-over-overlay').classList.add('hidden');
   if (currentGame === 'apple') startAppleGame();
@@ -904,6 +1056,7 @@ document.getElementById('restart-game-top-btn').addEventListener('click', () => 
   else if (currentGame === 'runner') startSubwayRunnerGame();
 });
 
+// Game Over Popup with Ranking Update
 function showGameOver(score, customTitle = 'Game Over', customMsg = null) {
   document.getElementById('game-over-title').textContent = customTitle;
   document.getElementById('final-score').textContent = score;
@@ -913,16 +1066,29 @@ function showGameOver(score, customTitle = 'Game Over', customMsg = null) {
     document.getElementById('game-over-msg').innerHTML = `Final Score: <span id="final-score">${score}</span>`;
   }
 
-  // Submit to leaderboard
+  const rankBox = document.getElementById('game-over-rank');
+  rankBox.classList.add('hidden');
+
+  // Submit to leaderboard immediately so BOTH buttons ("One More Round" & "Back to Arcade") save the ranking!
   if (currentGame) {
-    submitGameScore(currentGame, score);
+    socket.emit('submit-score', { game: currentGame, score }, (res) => {
+      if (res && res.success) {
+        if (res.rank && res.rank <= 5) {
+          rankBox.innerHTML = `🏆 <strong>New High Score!</strong> You're Rank #${res.rank}!`;
+          rankBox.classList.remove('hidden');
+        } else if (res.topScore) {
+          rankBox.innerHTML = `Top 1 Score: <strong>${res.topScore}</strong>`;
+          rankBox.classList.remove('hidden');
+        }
+      }
+    });
   }
 
   document.getElementById('game-over-overlay').classList.remove('hidden');
 }
 
 // ============================================================
-//  GAME 1: FRUIT BOX (사과 게임 - Fruit Box Game)
+//  GAME 1: FRUIT BOX (사과 게임)
 // ============================================================
 function startAppleGame() {
   stopActiveGame();
@@ -1225,7 +1391,6 @@ function startAppleGame() {
       }
     }
 
-    // Gauge bar
     const gaugeX = gridX + COLS * cellW + 28;
     const gaugeY = gridY + 20;
     const gaugeW = 16;
@@ -1590,7 +1755,6 @@ function startSubwayRunnerGame() {
   let gameActive = true;
   let started = false;
 
-  // 3 Lanes: 0 = Left, 1 = Center, 2 = Right
   const lanesX = [120, 240, 360];
   const horizonY = 170;
   const horizonW = 90;
@@ -1606,8 +1770,8 @@ function startSubwayRunnerGame() {
     slideTimer: 0,
   };
 
-  const obstacles = [];  // { lane, z, type: 'train' | 'barrier-low' | 'barrier-high' }
-  const coins = [];      // { lane, z, collected: false }
+  const obstacles = [];
+  const coins = [];
   let spawnTimer = 0;
 
   function moveLeft() {
@@ -1639,15 +1803,13 @@ function startSubwayRunnerGame() {
   function slide() {
     if (!started) started = true;
     if (player.isJumping) {
-      // Fast drop down
       player.vy = 16;
     } else {
       player.isSliding = true;
-      player.slideTimer = 35; // frames
+      player.slideTimer = 35;
     }
   }
 
-  // Keyboard controls
   function onKeyDown(e) {
     if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') { e.preventDefault(); moveLeft(); }
     if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') { e.preventDefault(); moveRight(); }
@@ -1655,7 +1817,6 @@ function startSubwayRunnerGame() {
     if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') { e.preventDefault(); slide(); }
   }
 
-  // Touch Swipe Controls for mobile
   let touchStartX = 0;
   let touchStartY = 0;
 
@@ -1697,7 +1858,6 @@ function startSubwayRunnerGame() {
       type: chosenType,
     });
 
-    // Spawn coins in free lane
     const coinLane = (chosenLane + 1) % 3;
     for (let i = 0; i < 4; i++) {
       coins.push({
@@ -1716,13 +1876,11 @@ function startSubwayRunnerGame() {
     score = Math.floor(distance / 5) + coinsCount * 10;
     document.getElementById('game-score-display').textContent = `Score: ${score}`;
 
-    // Smooth lane shift
     player.currentX += (player.targetX - player.currentX) * 0.28;
 
-    // Jumping physics
     if (player.isJumping) {
       player.yOffset += player.vy;
-      player.vy += 0.8; // gravity
+      player.vy += 0.8;
       if (player.yOffset >= 0) {
         player.yOffset = 0;
         player.vy = 0;
@@ -1730,7 +1888,6 @@ function startSubwayRunnerGame() {
       }
     }
 
-    // Sliding duration
     if (player.isSliding) {
       player.slideTimer--;
       if (player.slideTimer <= 0) {
@@ -1738,25 +1895,22 @@ function startSubwayRunnerGame() {
       }
     }
 
-    // Spawn obstacles
     spawnTimer++;
     if (spawnTimer > Math.max(38, 90 - Math.floor(distance * 0.01))) {
       spawnWorldObjects();
       spawnTimer = 0;
     }
 
-    // Move obstacles towards camera
     for (let i = obstacles.length - 1; i >= 0; i--) {
       const obs = obstacles[i];
       obs.z -= gameSpeed * 1.8;
 
-      // Collision zone: near player (z between 50 and 100)
       if (obs.z <= 110 && obs.z >= 50 && obs.lane === player.lane) {
         let safe = false;
         if (obs.type === 'barrier-low' && player.yOffset < -30) {
-          safe = true; // jumped over!
+          safe = true;
         } else if (obs.type === 'barrier-high' && player.isSliding) {
-          safe = true; // slid under!
+          safe = true;
         }
 
         if (!safe) {
@@ -1772,7 +1926,6 @@ function startSubwayRunnerGame() {
       }
     }
 
-    // Move coins towards camera
     for (let i = coins.length - 1; i >= 0; i--) {
       const c = coins[i];
       c.z -= gameSpeed * 1.8;
@@ -1789,7 +1942,6 @@ function startSubwayRunnerGame() {
     }
   }
 
-  // Perspective projection helper
   function project(lane, z) {
     const depth = Math.max(0.01, z / 1000);
     const pScale = 1 - depth * 0.85;
@@ -1804,28 +1956,24 @@ function startSubwayRunnerGame() {
   function draw() {
     ctx.clearRect(0, 0, W, H);
 
-    // Night city sky
     const sky = ctx.createLinearGradient(0, 0, 0, horizonY);
     sky.addColorStop(0, '#0c1021');
     sky.addColorStop(1, '#1e2952');
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, W, horizonY);
 
-    // Neon city skyline silhouettes
     ctx.fillStyle = '#0f1630';
     for (let i = 0; i < 9; i++) {
       const bh = 40 + (i * 19) % 55;
       ctx.fillRect(i * 55, horizonY - bh, 48, bh);
     }
 
-    // 3D Subway Tracks Ground
     const ground = ctx.createLinearGradient(0, horizonY, 0, H);
     ground.addColorStop(0, '#192038');
     ground.addColorStop(1, '#0e1220');
     ctx.fillStyle = ground;
     ctx.fillRect(0, horizonY, W, H - horizonY);
 
-    // Track Rails converging to horizon
     ctx.strokeStyle = '#34495e';
     ctx.lineWidth = 3;
     const railXOffsets = [-60, -20, 20, 60];
@@ -1836,7 +1984,6 @@ function startSubwayRunnerGame() {
       ctx.stroke();
     });
 
-    // Moving Railroad ties (sleepers)
     const tieSpacing = 40;
     const tieOffset = (distance * 2) % tieSpacing;
     ctx.strokeStyle = '#222f4b';
@@ -1850,7 +1997,6 @@ function startSubwayRunnerGame() {
       ctx.stroke();
     }
 
-    // Draw Coins
     coins.forEach(c => {
       if (c.collected) return;
       const p = project(c.lane, c.z);
@@ -1870,31 +2016,27 @@ function startSubwayRunnerGame() {
       ctx.restore();
     });
 
-    // Draw Obstacles (sorted back to front)
     obstacles.sort((a, b) => b.z - a.z);
     obstacles.forEach(obs => {
       const p = project(obs.lane, obs.z);
       const ow = 75 * p.scale;
 
       if (obs.type === 'train') {
-        // Red Subway Train Car
         const th = 110 * p.scale;
         ctx.fillStyle = '#c0392b';
         ctx.fillRect(p.x - ow / 2, p.y - th, ow, th);
         ctx.fillStyle = '#e74c3c';
-        ctx.fillRect(p.x - ow / 2 + 4, p.y - th + 4, ow - 8, th * 0.35); // windows
+        ctx.fillRect(p.x - ow / 2 + 4, p.y - th + 4, ow - 8, th * 0.35);
         ctx.fillStyle = '#f1c40f';
-        ctx.fillRect(p.x - ow / 2 + 10, p.y - 20 * p.scale, 14 * p.scale, 8 * p.scale); // headlights
+        ctx.fillRect(p.x - ow / 2 + 10, p.y - 20 * p.scale, 14 * p.scale, 8 * p.scale);
         ctx.fillRect(p.x + ow / 2 - 24, p.y - 20 * p.scale, 14 * p.scale, 8 * p.scale);
       } else if (obs.type === 'barrier-low') {
-        // Low barricade (Must jump!)
         const bh = 32 * p.scale;
         ctx.fillStyle = '#e67e22';
         ctx.fillRect(p.x - ow / 2, p.y - bh, ow, bh);
         ctx.fillStyle = '#fff';
         ctx.fillRect(p.x - ow / 2 + 10, p.y - bh + 6, ow - 20, 6 * p.scale);
       } else if (obs.type === 'barrier-high') {
-        // High street arch / barrier (Must slide under!)
         const bh = 70 * p.scale;
         ctx.strokeStyle = '#95a5a6';
         ctx.lineWidth = 4 * p.scale;
@@ -1908,18 +2050,15 @@ function startSubwayRunnerGame() {
       }
     });
 
-    // Draw Player
     const playerBaseY = 530;
     const px = player.currentX;
     const py = playerBaseY + player.yOffset;
 
-    // Shadow
     ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
     ctx.beginPath();
     ctx.ellipse(px, playerBaseY, 26, 8, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    // Skateboard
     ctx.fillStyle = '#2ecc71';
     ctx.fillRect(px - 28, py - 4, 56, 8);
     ctx.fillStyle = '#e74c3c';
@@ -1928,37 +2067,32 @@ function startSubwayRunnerGame() {
     ctx.arc(px + 18, py + 5, 4, 0, Math.PI * 2);
     ctx.fill();
 
-    // Runner character (normal vs sliding)
     if (player.isSliding) {
-      // Ducking / sliding posture
-      ctx.fillStyle = '#3498db'; // hoodie
+      ctx.fillStyle = '#3498db';
       ctx.fillRect(px - 20, py - 26, 40, 22);
-      ctx.fillStyle = '#f1c40f'; // cap
+      ctx.fillStyle = '#f1c40f';
       ctx.beginPath();
       ctx.arc(px + 4, py - 28, 10, 0, Math.PI * 2);
       ctx.fill();
     } else {
-      // Standing / running posture
-      ctx.fillStyle = '#2c3e50'; // pants
+      ctx.fillStyle = '#2c3e50';
       ctx.fillRect(px - 14, py - 28, 28, 24);
 
-      ctx.fillStyle = '#3498db'; // blue hoodie
+      ctx.fillStyle = '#3498db';
       ctx.fillRect(px - 18, py - 58, 36, 32);
 
-      // Head + Cap
-      ctx.fillStyle = '#f5cd79'; // face
+      ctx.fillStyle = '#f5cd79';
       ctx.beginPath();
       ctx.arc(px, py - 68, 13, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.fillStyle = '#e74c3c'; // red cap
+      ctx.fillStyle = '#e74c3c';
       ctx.beginPath();
       ctx.arc(px, py - 72, 13, Math.PI, 0);
       ctx.fill();
-      ctx.fillRect(px, py - 74, 18, 4); // cap visor
+      ctx.fillRect(px, py - 74, 18, 4);
     }
 
-    // HUD
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 22px "Segoe UI", sans-serif';
     ctx.textAlign = 'left';
@@ -2022,7 +2156,6 @@ document.getElementById('gartic-back-btn').addEventListener('click', () => {
   document.getElementById('arcade-menu').classList.remove('hidden');
 });
 
-// Setup drawing tools on the canvas
 const garticCanvas = document.getElementById('gartic-draw-canvas');
 const gCtx = garticCanvas.getContext('2d');
 
@@ -2032,7 +2165,6 @@ function initGarticCanvas() {
 }
 initGarticCanvas();
 
-// Drawing event handlers
 function getGarticCanvasPos(e) {
   const rect = garticCanvas.getBoundingClientRect();
   const scaleX = garticCanvas.width / rect.width;
@@ -2071,7 +2203,6 @@ window.addEventListener('mouseup', () => {
   isDrawingGartic = false;
 });
 
-// Touch support for drawing on mobile/tablets
 garticCanvas.addEventListener('touchstart', (e) => {
   e.preventDefault();
   isDrawingGartic = true;
@@ -2100,7 +2231,6 @@ garticCanvas.addEventListener('touchend', () => {
   isDrawingGartic = false;
 });
 
-// Color Palette clicks
 document.querySelectorAll('#draw-palette .color-dot').forEach(dot => {
   dot.addEventListener('click', () => {
     document.querySelectorAll('#draw-palette .color-dot').forEach(d => d.classList.remove('active'));
@@ -2109,7 +2239,6 @@ document.querySelectorAll('#draw-palette .color-dot').forEach(dot => {
   });
 });
 
-// Brush Size clicks
 document.querySelectorAll('.brush-sizes .size-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.brush-sizes .size-btn').forEach(b => b.classList.remove('active'));
@@ -2120,12 +2249,11 @@ document.querySelectorAll('.brush-sizes .size-btn').forEach(btn => {
 
 document.getElementById('draw-clear-btn').addEventListener('click', initGarticCanvas);
 
-// Start game button
 document.getElementById('gartic-start-btn').addEventListener('click', () => {
   socket.emit('gartic-start', { roomId: 'main' });
 });
 
-// Submit Prompt
+// Prompt input (Enter key supported)
 const promptInput = document.getElementById('gartic-prompt-input');
 promptInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
@@ -2150,7 +2278,7 @@ document.getElementById('gartic-draw-submit').addEventListener('click', () => {
   document.getElementById('gartic-draw-submit').disabled = true;
 });
 
-// Submit Guess
+// Guess input (Enter key supported)
 const guessInput = document.getElementById('gartic-guess-input');
 guessInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
@@ -2172,7 +2300,60 @@ document.getElementById('gartic-album-play-again').addEventListener('click', () 
   socket.emit('gartic-reset-lobby', { roomId: 'main' });
 });
 
-// Receive Gartic Phone state updates from server
+// Share Album to Chat
+document.getElementById('gartic-album-share-chat').addEventListener('click', () => {
+  if (!currentGarticBooks) return;
+
+  socket.emit('get-rooms', (rooms) => {
+    if (!rooms || rooms.length === 0) {
+      alert('You have no chat rooms to share to! Create a chat room first.');
+      return;
+    }
+
+    let roomNames = rooms.map((r, i) => `${i + 1}. ${r.name}`).join('\n');
+    let pick = prompt(`Select a chat room to share this album to:\n${roomNames}\n(Enter room number 1-${rooms.length}):`, '1');
+    if (!pick) return;
+
+    let idx = parseInt(pick, 10) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= rooms.length) {
+      alert('Invalid room selection.');
+      return;
+    }
+
+    const targetRoom = rooms[idx];
+
+    // Share summary text and all drawings
+    Object.keys(currentGarticBooks).forEach((author) => {
+      const chain = currentGarticBooks[author];
+      let summaryText = `🎨 [Gartic Phone Album] ${author}'s Story:\n`;
+      chain.forEach((step, stepIdx) => {
+        if (step.type === 'prompt') {
+          summaryText += `1. 💬 ${step.author} wrote: "${step.content}"\n`;
+        } else if (step.type === 'guess') {
+          summaryText += `${stepIdx + 1}. 💬 ${step.author} guessed: "${step.content}"\n`;
+        } else if (step.type === 'drawing') {
+          summaryText += `${stepIdx + 1}. 🎨 ${step.author} drew a picture\n`;
+        }
+      });
+
+      socket.emit('send-message', { roomId: targetRoom.id, text: summaryText, image: null });
+
+      // Send each drawing so everyone in chat can see it!
+      chain.forEach(step => {
+        if (step.type === 'drawing' && step.content) {
+          socket.emit('send-message', {
+            roomId: targetRoom.id,
+            text: `🎨 ${step.author}'s Drawing:`,
+            image: step.content
+          });
+        }
+      });
+    });
+
+    alert(`✅ Gartic Phone Album successfully shared to "${targetRoom.name}"!`);
+  });
+});
+
 socket.on('gartic-state', (state) => {
   if (currentGame === 'gartic') {
     renderGarticView(state);
@@ -2189,7 +2370,11 @@ function renderGarticView(state) {
 
   timerBadge.textContent = `⏱️ ${state.timer}s`;
 
-  // Hide all views first
+  // Detect round/phase changes to reset inputs and drawing canvas
+  const isNewPhase = (state.status !== lastGarticStatus || state.round !== lastGarticRound);
+  lastGarticStatus = state.status;
+  lastGarticRound = state.round;
+
   [lobbyView, promptView, drawView, guessView, albumView].forEach(v => v.classList.add('hidden'));
 
   if (state.status === 'lobby') {
@@ -2216,20 +2401,39 @@ function renderGarticView(state) {
     }
   } else if (state.status === 'prompt') {
     promptView.classList.remove('hidden');
+    if (isNewPhase) {
+      promptInput.value = '';
+      document.getElementById('gartic-prompt-submit').disabled = false;
+      document.getElementById('gartic-prompt-status').textContent = '';
+    }
   } else if (state.status === 'draw') {
     drawView.classList.remove('hidden');
     const taskText = state.myAssignment && state.myAssignment.itemToProcess ? state.myAssignment.itemToProcess.content : 'Something funny';
     document.getElementById('gartic-draw-task').textContent = `"${taskText}"`;
+
+    // Reset to a brand new blank white paper for every drawing phase!
+    if (isNewPhase) {
+      initGarticCanvas();
+      document.getElementById('gartic-draw-submit').disabled = false;
+      document.getElementById('gartic-draw-status').textContent = '';
+    }
   } else if (state.status === 'guess') {
     guessView.classList.remove('hidden');
     const drawingSrc = state.myAssignment && state.myAssignment.itemToProcess ? state.myAssignment.itemToProcess.content : '';
     document.getElementById('gartic-guess-img').src = drawingSrc;
+    if (isNewPhase) {
+      guessInput.value = '';
+      document.getElementById('gartic-guess-submit').disabled = false;
+      document.getElementById('gartic-guess-status').textContent = '';
+    }
   } else if (state.status === 'album') {
     albumView.classList.remove('hidden');
+    currentGarticBooks = state.album;
     renderGarticAlbum(state.album);
   }
 }
 
+// Render all stacked drawings and prompts from the game in order
 function renderGarticAlbum(books) {
   const container = document.getElementById('gartic-album-container');
   container.innerHTML = '';
@@ -2250,7 +2454,7 @@ function renderGarticAlbum(books) {
           </div>
         `;
       } else {
-        const label = idx === 0 ? 'Original Prompt' : 'Guessed';
+        const label = idx === 0 ? 'Original Prompt' : `Guess #${Math.floor(idx / 2) + 1}`;
         stepsHtml += `
           <div class="album-step">
             <div class="album-author">💬 ${escHtml(step.author)} (${label}):</div>
@@ -2261,7 +2465,7 @@ function renderGarticAlbum(books) {
     });
 
     card.innerHTML = `
-      <div class="album-chain-header">📖 ${escHtml(author)}'s Book</div>
+      <div class="album-chain-header">📖 ${escHtml(author)}'s Book Chain</div>
       ${stepsHtml}
     `;
     container.appendChild(card);

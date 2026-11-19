@@ -12,7 +12,7 @@ const path = require('path');
 const app = express();
 const server = http.createServer(app);
 
-// Allow up to 10MB payloads for sending images in chat and drawings
+// Allow up to 10MB payloads for sending images in chat and gallery
 const io = new Server(server, {
   maxHttpBufferSize: 1e7
 });
@@ -54,6 +54,28 @@ const leaderboards = {
     { username: '즤', score: 320, date: Date.now() - 7200000 },
   ],
 };
+
+// ============================================================
+//  Gallery Data Store (Sections & Photos)
+// ============================================================
+let gallerySections = [
+  {
+    id: 1,
+    name: 'Hangout Memories 📸',
+    createdBy: 'bang',
+    createdAt: Date.now() - 86400000,
+    photos: []
+  },
+  {
+    id: 2,
+    name: 'Funny Moments 😂',
+    createdBy: 'bang',
+    createdAt: Date.now() - 43200000,
+    photos: []
+  }
+];
+let nextSectionId = 3;
+let nextPhotoId = 1;
 
 // ============================================================
 //  Gartic Phone Game Rooms
@@ -149,8 +171,11 @@ io.on('connection', (socket) => {
     callback(leaderboards);
   });
 
-  socket.on('submit-score', ({ game, score }) => {
-    if (!currentUser || !leaderboards[game] || typeof score !== 'number') return;
+  socket.on('submit-score', ({ game, score }, callback) => {
+    if (!currentUser || !leaderboards[game] || typeof score !== 'number') {
+      if (callback) callback({ success: false });
+      return;
+    }
     const list = leaderboards[game];
 
     // Find if user already has a score in this game
@@ -169,6 +194,84 @@ io.on('connection', (socket) => {
     if (list.length > 5) list.length = 5;
 
     io.emit('leaderboard-updated', { game, list });
+
+    // Calculate rank
+    const myRankIdx = list.findIndex(item => item.username === currentUser && item.score >= score);
+    const myRank = myRankIdx !== -1 ? myRankIdx + 1 : null;
+
+    if (callback) {
+      callback({
+        success: true,
+        rank: myRank,
+        topScore: list[0] ? list[0].score : score,
+        score
+      });
+    }
+  });
+
+  // ---------- Gallery (Sections & Photos) ----------
+  socket.on('get-gallery', (callback) => {
+    callback(gallerySections);
+  });
+
+  // Only "bang" can create new sections!
+  socket.on('create-gallery-section', ({ name }, callback) => {
+    if (currentUser !== 'bang') {
+      return callback({ success: false, message: 'Only bang can create new sections!' });
+    }
+    const cleanName = (name || '').trim();
+    if (!cleanName) {
+      return callback({ success: false, message: 'Section name cannot be empty.' });
+    }
+    const newSection = {
+      id: nextSectionId++,
+      name: cleanName,
+      createdBy: currentUser,
+      createdAt: Date.now(),
+      photos: []
+    };
+    gallerySections.push(newSection);
+    io.emit('gallery-updated', gallerySections);
+    callback({ success: true, section: newSection });
+  });
+
+  // Anyone logged in can upload photos into existing sections!
+  socket.on('upload-gallery-photo', ({ sectionId, image, caption }, callback) => {
+    if (!currentUser || !image) {
+      return callback({ success: false, message: 'Missing user or image.' });
+    }
+    const sec = gallerySections.find(s => s.id === sectionId);
+    if (!sec) {
+      return callback({ success: false, message: 'Section not found.' });
+    }
+    const photo = {
+      id: nextPhotoId++,
+      url: image,
+      caption: caption || '',
+      uploader: currentUser,
+      timestamp: Date.now()
+    };
+    sec.photos.unshift(photo); // newest photo first
+    io.emit('gallery-updated', gallerySections);
+    callback({ success: true, photo });
+  });
+
+  // Delete photo (uploader or "bang" can delete)
+  socket.on('delete-gallery-photo', ({ sectionId, photoId }, callback) => {
+    if (!currentUser) return;
+    const sec = gallerySections.find(s => s.id === sectionId);
+    if (!sec) return callback({ success: false });
+
+    const photo = sec.photos.find(p => p.id === photoId);
+    if (!photo) return callback({ success: false });
+
+    if (currentUser === 'bang' || photo.uploader === currentUser) {
+      sec.photos = sec.photos.filter(p => p.id !== photoId);
+      io.emit('gallery-updated', gallerySections);
+      callback({ success: true });
+    } else {
+      callback({ success: false, message: 'Permission denied.' });
+    }
   });
 
   // ---------- Chat: get rooms ----------
@@ -294,16 +397,12 @@ io.on('connection', (socket) => {
       call.peers.push(currentUser);
     }
 
-    // Tell all existing peers in the call that a new peer joined.
-    // Existing peers will initiate the WebRTC offer to this newcomer.
     existingPeers.forEach(p => {
       if (p !== currentUser && onlineUsers[p]) {
         io.to(onlineUsers[p]).emit('peer-joined', { callId, username: currentUser });
       }
     });
 
-    // The newcomer returns existing peers, but DOES NOT initiate offers.
-    // This strictly prevents offer glare / collision!
     callback({ success: true, peers: existingPeers });
   });
 
@@ -356,7 +455,6 @@ io.on('connection', (socket) => {
     const pub = getGarticPublicState(room);
     room.players.forEach(p => {
       if (onlineUsers[p]) {
-        // Send customized assignment per player
         const assignment = room.assignments[p] || null;
         io.to(onlineUsers[p]).emit('gartic-state', { ...pub, myAssignment: assignment });
       }
@@ -400,12 +498,11 @@ io.on('connection', (socket) => {
     if (!currentUser) return;
     const room = garticRooms[roomId];
     if (!room || room.host !== currentUser) return;
-    if (room.players.length < 2) return; // Need at least 2 players
+    if (room.players.length < 2) return;
 
-    // Initialize game
     room.status = 'prompt';
     room.round = 1;
-    // Total rounds: each player creates a prompt, then draw/guess alternates for N rounds
+    // Each round is an alternating draw or guess, up to players.length * 2
     room.totalRounds = Math.min(room.players.length * 2, 6);
     room.books = {};
     room.assignments = {};
@@ -443,7 +540,6 @@ io.on('connection', (socket) => {
     room.submissions[currentUser] = content;
     broadcastGarticState(roomId);
 
-    // If all online players in the room submitted, advance immediately!
     const allSubmitted = room.players.every(p => room.submissions[p] !== undefined);
     if (allSubmitted) {
       if (room.timerInterval) clearInterval(room.timerInterval);
@@ -454,7 +550,6 @@ io.on('connection', (socket) => {
   function advanceGarticRound(room) {
     const N = room.players.length;
 
-    // Save submissions into corresponding player books
     room.players.forEach(p => {
       const assignment = room.assignments[p];
       if (assignment) {
@@ -471,7 +566,6 @@ io.on('connection', (socket) => {
 
     room.submissions = {};
 
-    // Check if game is finished
     if (room.round >= room.totalRounds) {
       room.status = 'album';
       room.round = room.totalRounds;
@@ -480,13 +574,10 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // Determine next phase: alternates draw <-> guess
     room.round++;
     const isDrawRound = (room.round % 2 === 0);
     room.status = isDrawRound ? 'draw' : 'guess';
 
-    // Shift books cyclically to next player:
-    // Player i receives book of player (i - shift) % N
     const shift = (room.round - 1) % N;
     room.players.forEach((p, idx) => {
       const targetIdx = (idx - shift + N) % N;

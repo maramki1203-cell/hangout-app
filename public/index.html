@@ -30,10 +30,11 @@
       <button id="logout-btn">Log Out</button>
     </header>
 
-    <!-- Navigation — the 3 main buttons -->
+    <!-- Navigation — 4 main buttons -->
     <nav id="main-nav">
       <button class="nav-btn active" data-section="calls">📞 Calls</button>
       <button class="nav-btn" data-section="chat">💬 Chat</button>
+      <button class="nav-btn" data-section="gallery">🖼️ Gallery</button>
       <button class="nav-btn" data-section="arcade">🕹️ Arcade</button>
     </nav>
 
@@ -80,6 +81,37 @@
               <input type="text" id="message-input" placeholder="Type a message or paste image…" autocomplete="off" />
               <button id="send-msg-btn">Send</button>
             </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ GALLERY SECTION (NEW!) ============ -->
+    <section id="gallery-section" class="page">
+      <div class="gallery-container">
+        <!-- Left: Sections sidebar -->
+        <div class="gallery-sidebar">
+          <div class="gallery-sidebar-header">
+            <h3>📁 Sections</h3>
+            <button id="create-section-btn" class="primary-btn small-btn hidden" title="Only bang can create new sections">➕ New Section</button>
+          </div>
+          <div id="gallery-sections-list" class="list-scroll"></div>
+        </div>
+
+        <!-- Right: Photos in selected section -->
+        <div class="gallery-main">
+          <div class="gallery-main-header">
+            <div>
+              <h2 id="gallery-current-section-name">Select a section</h2>
+              <span id="gallery-section-meta" class="subtle-meta">Choose a folder on the left</span>
+            </div>
+            <div class="gallery-actions">
+              <input type="file" id="gallery-file-input" accept="image/*" class="hidden" />
+              <button id="upload-photo-btn" class="primary-btn hidden">📷 Upload Photo</button>
+            </div>
+          </div>
+          <div id="gallery-photos-grid" class="photos-grid">
+            <div class="placeholder">Select a section on the left to see pictures!</div>
           </div>
         </div>
       </div>
@@ -167,8 +199,8 @@
             <p id="game-over-msg">Final Score: <span id="final-score">0</span></p>
             <div id="game-over-rank" class="rank-highlight hidden"></div>
             <div style="display: flex; gap: 12px; justify-content: center; margin-top: 16px;">
-              <button id="restart-game-btn" class="primary-btn">Play Again</button>
-              <button id="exit-game-btn" class="secondary-btn">Back to Arcade</button>
+              <button id="restart-game-btn" class="primary-btn">🔄 One More Round</button>
+              <button id="exit-game-btn" class="secondary-btn">🏠 Back to Arcade</button>
             </div>
           </div>
         </div>
@@ -255,8 +287,9 @@
           <h2>📖 Telephone Album Reveal!</h2>
           <p>Here is how the prompts morphed through drawings and guesses!</p>
           <div id="gartic-album-container"></div>
-          <div class="album-controls">
+          <div class="album-controls" style="display:flex; gap:14px; flex-wrap:wrap; justify-content:center;">
             <button id="gartic-album-play-again" class="primary-btn big-btn">🔄 Play Again</button>
+            <button id="gartic-album-share-chat" class="secondary-btn big-btn" style="border-color:#4e8cff; color:#fff;">📤 Share Album to Chat</button>
           </div>
         </div>
       </div>
@@ -311,6 +344,19 @@
       <div class="modal-actions">
         <button id="modal-chat-cancel" class="secondary-btn">Cancel</button>
         <button id="modal-chat-create" class="primary-btn">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Create Gallery Section (Bang only) -->
+  <div id="modal-section" class="modal hidden">
+    <div class="modal-content">
+      <h2>New Gallery Section</h2>
+      <p>Enter a title for this photo section (e.g., Hangout Memories, Memes, Food):</p>
+      <input type="text" id="new-section-name" placeholder="Section name" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="modal-section-cancel" class="secondary-btn">Cancel</button>
+        <button id="modal-section-create" class="primary-btn">Create Section</button>
       </div>
     </div>
   </div>
