@@ -75,7 +75,9 @@
             </div>
             <div id="messages-area"></div>
             <div id="message-bar">
-              <input type="text" id="message-input" placeholder="Type a message…" autocomplete="off" />
+              <input type="file" id="chat-file-input" accept="image/*" class="hidden" />
+              <button type="button" id="chat-image-btn" title="Send a photo" class="icon-btn">📷</button>
+              <input type="text" id="message-input" placeholder="Type a message or paste image…" autocomplete="off" />
               <button id="send-msg-btn">Send</button>
             </div>
           </div>
@@ -86,22 +88,70 @@
     <!-- ============ ARCADE SECTION ============ -->
     <section id="arcade-section" class="page">
       <div id="arcade-menu">
-        <h2>🕹️ Arcade</h2>
-        <div class="arcade-cards">
-          <div class="arcade-card" data-game="apple">
-            <div class="arcade-icon">🍎</div>
-            <h3>Fruit Box (사과 게임)</h3>
-            <p>Box apples that sum to 10 to clear them!</p>
-            <button class="primary-btn play-btn" data-game="apple">Play</button>
+        <div class="arcade-header-row">
+          <div>
+            <h2>🕹️ Arcade & Games</h2>
+            <p style="color:#8899aa; font-size:14px; margin-top:4px;">Solo challenges & multiplayer party games with friends!</p>
           </div>
-          <div class="arcade-card" data-game="flappy">
-            <div class="arcade-icon">🐦</div>
-            <h3>Flappy Bird</h3>
-            <p>Fly through the pipes!</p>
-            <button class="primary-btn play-btn" data-game="flappy">Play</button>
+        </div>
+
+        <div class="arcade-layout">
+          <!-- Game Selection Cards -->
+          <div class="arcade-cards">
+            <!-- Game 1: Fruit Box -->
+            <div class="arcade-card" data-game="apple">
+              <div class="arcade-icon">🍎</div>
+              <h3>Fruit Box (사과 게임)</h3>
+              <p>Drag to select apples that sum to 10!</p>
+              <button class="primary-btn play-btn" data-game="apple">Play</button>
+            </div>
+
+            <!-- Game 2: Flappy Bird -->
+            <div class="arcade-card" data-game="flappy">
+              <div class="arcade-icon">🐦</div>
+              <h3>Flappy Bird</h3>
+              <p>Chubby cartoon bird! Avoid the green pipes.</p>
+              <button class="primary-btn play-btn" data-game="flappy">Play</button>
+            </div>
+
+            <!-- Game 3: Subway Runner -->
+            <div class="arcade-card" data-game="runner">
+              <div class="arcade-icon">🛹</div>
+              <h3>Subway Runner</h3>
+              <p>3-lane track runner! Jump, slide, dodge & collect coins.</p>
+              <button class="primary-btn play-btn" data-game="runner">Play</button>
+            </div>
+
+            <!-- Game 4: Gartic Phone (Online Multiplayer) -->
+            <div class="arcade-card highlight-card" data-game="gartic">
+              <div class="badge-tag">Online Multiplayer</div>
+              <div class="arcade-icon">🎨</div>
+              <h3>Gartic Phone (갈틱폰)</h3>
+              <p>Hilarious telephone drawing & guessing with friends!</p>
+              <button class="primary-btn play-btn gartic-play-btn" data-game="gartic">Play with Friends</button>
+            </div>
+          </div>
+
+          <!-- Leaderboard Sidebar (Top 5 for games) -->
+          <div class="leaderboard-sidebar">
+            <div class="lb-header">
+              <span>🏆 Top 5 Champions</span>
+            </div>
+            
+            <div class="lb-tabs">
+              <button class="lb-tab active" data-lb="apple">🍎 Fruit Box</button>
+              <button class="lb-tab" data-lb="flappy">🐦 Flappy</button>
+              <button class="lb-tab" data-lb="runner">🛹 Runner</button>
+            </div>
+
+            <div id="leaderboard-content" class="lb-list">
+              <!-- Populated dynamically via JS -->
+            </div>
           </div>
         </div>
       </div>
+
+      <!-- Canvas Game Area (Fruit Box, Flappy Bird, Subway Runner) -->
       <div id="game-area" class="hidden">
         <div id="game-topbar">
           <button id="back-to-arcade" class="secondary-btn">← Back to Arcade</button>
@@ -115,10 +165,98 @@
           <div class="game-over-box">
             <h2 id="game-over-title">Game Over</h2>
             <p id="game-over-msg">Final Score: <span id="final-score">0</span></p>
+            <div id="game-over-rank" class="rank-highlight hidden"></div>
             <div style="display: flex; gap: 12px; justify-content: center; margin-top: 16px;">
               <button id="restart-game-btn" class="primary-btn">Play Again</button>
               <button id="exit-game-btn" class="secondary-btn">Back to Arcade</button>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ GARTIC PHONE INTERFACE ============ -->
+      <div id="gartic-area" class="hidden">
+        <div id="gartic-topbar">
+          <button id="gartic-back-btn" class="secondary-btn">← Back to Arcade</button>
+          <span id="gartic-room-title">🎨 Gartic Phone</span>
+          <span id="gartic-timer" class="badge-timer">⏱️ 0s</span>
+        </div>
+
+        <!-- 1. Lobby Phase -->
+        <div id="gartic-lobby" class="gartic-card-view">
+          <h2>Gartic Phone Party Room</h2>
+          <p>Gather your friends online to draw and guess hilarious telephone chains!</p>
+          <div class="gartic-player-box">
+            <h3>Connected Players (<span id="gartic-player-count">0</span>):</h3>
+            <ul id="gartic-player-list"></ul>
+          </div>
+          <div class="gartic-lobby-actions">
+            <button id="gartic-start-btn" class="primary-btn big-btn">🚀 Start Game</button>
+            <p id="gartic-lobby-hint" class="hint-text">Waiting for host to start (need at least 2 players)...</p>
+          </div>
+        </div>
+
+        <!-- 2. Prompt Phase -->
+        <div id="gartic-prompt-phase" class="gartic-card-view hidden">
+          <h2>Round 1: Write a Funny Prompt!</h2>
+          <p>Write an absurd, funny sentence that another player will have to draw.</p>
+          <input type="text" id="gartic-prompt-input" placeholder="e.g., A cat driving a sports car on Mars" maxlength="70" autocomplete="off" />
+          <button id="gartic-prompt-submit" class="primary-btn big-btn">Submit Prompt</button>
+          <p id="gartic-prompt-status" class="status-subtle"></p>
+        </div>
+
+        <!-- 3. Drawing Phase -->
+        <div id="gartic-draw-phase" class="gartic-card-view hidden">
+          <div class="draw-header">
+            <h3>Draw this: <span id="gartic-draw-task" class="highlight-text">...</span></h3>
+          </div>
+          <div class="draw-tools">
+            <div class="palette" id="draw-palette">
+              <span class="color-dot active" style="background:#000000" data-color="#000000"></span>
+              <span class="color-dot" style="background:#ffffff" data-color="#ffffff"></span>
+              <span class="color-dot" style="background:#e74c3c" data-color="#e74c3c"></span>
+              <span class="color-dot" style="background:#e67e22" data-color="#e67e22"></span>
+              <span class="color-dot" style="background:#f1c40f" data-color="#f1c40f"></span>
+              <span class="color-dot" style="background:#2ecc71" data-color="#2ecc71"></span>
+              <span class="color-dot" style="background:#1abc9c" data-color="#1abc9c"></span>
+              <span class="color-dot" style="background:#3498db" data-color="#3498db"></span>
+              <span class="color-dot" style="background:#9b59b6" data-color="#9b59b6"></span>
+              <span class="color-dot" style="background:#e84393" data-color="#e84393"></span>
+              <span class="color-dot" style="background:#795548" data-color="#795548"></span>
+            </div>
+            <div class="brush-sizes">
+              <button class="size-btn active" data-size="4">Small</button>
+              <button class="size-btn" data-size="8">Medium</button>
+              <button class="size-btn" data-size="16">Thick</button>
+              <button id="draw-clear-btn" class="secondary-btn small-btn">🗑️ Clear</button>
+            </div>
+          </div>
+          <canvas id="gartic-draw-canvas" width="600" height="400"></canvas>
+          <div class="draw-actions">
+            <button id="gartic-draw-submit" class="primary-btn big-btn">Done Drawing! 🎨</button>
+            <p id="gartic-draw-status" class="status-subtle"></p>
+          </div>
+        </div>
+
+        <!-- 4. Guess Phase -->
+        <div id="gartic-guess-phase" class="gartic-card-view hidden">
+          <h2>What was drawn?</h2>
+          <p>Look at the drawing below and guess what on earth it is!</p>
+          <div class="guess-img-box">
+            <img id="gartic-guess-img" src="" alt="Drawing to guess" />
+          </div>
+          <input type="text" id="gartic-guess-input" placeholder="Type your guess here…" maxlength="70" autocomplete="off" />
+          <button id="gartic-guess-submit" class="primary-btn big-btn">Submit Guess</button>
+          <p id="gartic-guess-status" class="status-subtle"></p>
+        </div>
+
+        <!-- 5. Album Slideshow Phase (The hilarious reveal!) -->
+        <div id="gartic-album-phase" class="gartic-card-view hidden">
+          <h2>📖 Telephone Album Reveal!</h2>
+          <p>Here is how the prompts morphed through drawings and guesses!</p>
+          <div id="gartic-album-container"></div>
+          <div class="album-controls">
+            <button id="gartic-album-play-again" class="primary-btn big-btn">🔄 Play Again</button>
           </div>
         </div>
       </div>
@@ -141,8 +279,15 @@
     </div>
   </div>
 
-  <!-- ==================== MODALS ==================== -->
+  <!-- ==================== IMAGE VIEWER MODAL ==================== -->
+  <div id="image-viewer-modal" class="modal hidden">
+    <div class="image-viewer-content">
+      <img id="image-viewer-img" src="" alt="Full image" />
+      <button id="image-viewer-close" class="secondary-btn close-preview-btn">✕ Close</button>
+    </div>
+  </div>
 
+  <!-- ==================== MODALS ==================== -->
   <!-- Modal: Select users for a call -->
   <div id="modal-call" class="modal hidden">
     <div class="modal-content">

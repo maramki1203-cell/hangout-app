@@ -11,18 +11,43 @@ let onlineUsers = [];
 let currentRoomId = null;
 let currentCallId = null;
 let localStream = null;
-let peerConnections = {};  // username -> RTCPeerConnection
+let peerConnections = {};      // username -> RTCPeerConnection
+let iceCandidateQueue = {};    // username -> [candidates]
 let micEnabled = true;
 let camEnabled = true;
 let currentGame = null;
 let gameLoop = null;
+let activeGameCleanup = null;
+let currentLbTab = 'apple';
+let leaderboardsData = { apple: [], flappy: [], runner: [] };
 
-// ---- ICE servers for WebRTC ----
+// ---- Robust WebRTC ICE Servers (STUN + OpenRelay TURN for remote NAT traversal) ----
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
-  ]
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    // Free open relay TURN servers for NAT traversal behind symmetric NAT / firewalls
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    }
+  ],
+  iceCandidatePoolSize: 10
 };
 
 // ============================================================
@@ -52,6 +77,7 @@ function doLogin() {
       document.getElementById('user-label').textContent = `Logged in as ${myUsername}`;
       loadRooms();
       loadCallHistory();
+      loadLeaderboards();
     } else {
       loginError.textContent = res.message;
     }
@@ -73,9 +99,8 @@ document.querySelectorAll('.nav-btn').forEach(btn => {
     document.getElementById(btn.dataset.section + '-section').classList.add('active');
 
     // Stop game if switching away from arcade
-    if (btn.dataset.section !== 'arcade' && gameLoop) {
-      cancelAnimationFrame(gameLoop);
-      gameLoop = null;
+    if (btn.dataset.section !== 'arcade') {
+      stopActiveGame();
     }
   });
 });
@@ -104,7 +129,61 @@ function renderOnlineUsers() {
 }
 
 // ============================================================
-//  CHAT — Rooms
+//  LEADERBOARDS (Top 5 scores)
+// ============================================================
+function loadLeaderboards() {
+  socket.emit('get-leaderboards', (data) => {
+    if (data) {
+      leaderboardsData = data;
+      renderLeaderboard();
+    }
+  });
+}
+
+socket.on('leaderboard-updated', ({ game, list }) => {
+  leaderboardsData[game] = list;
+  renderLeaderboard();
+});
+
+document.querySelectorAll('.lb-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.lb-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    currentLbTab = tab.dataset.lb;
+    renderLeaderboard();
+  });
+});
+
+function renderLeaderboard() {
+  const container = document.getElementById('leaderboard-content');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const list = leaderboardsData[currentLbTab] || [];
+  if (list.length === 0) {
+    container.innerHTML = '<p style="color:#667;font-size:13px;padding:8px 0;">No scores yet! Be the first!</p>';
+    return;
+  }
+
+  const medals = ['🥇', '🥈', '🥉', '4.', '5.'];
+  list.forEach((item, index) => {
+    const div = document.createElement('div');
+    div.className = `lb-item rank-${index + 1}`;
+    div.innerHTML = `
+      <span class="lb-rank">${medals[index] || (index + 1) + '.'}</span>
+      <span class="lb-name">${escHtml(item.username)}</span>
+      <span class="lb-score">${item.score}</span>
+    `;
+    container.appendChild(div);
+  });
+}
+
+function submitGameScore(game, score) {
+  socket.emit('submit-score', { game, score });
+}
+
+// ============================================================
+//  CHAT — Rooms & Messages with Photo Upload
 // ============================================================
 function loadRooms() {
   socket.emit('get-rooms', (rooms) => {
@@ -118,7 +197,14 @@ function renderRoomList(rooms) {
   rooms.forEach(r => {
     const div = document.createElement('div');
     div.className = 'room-item' + (r.id === currentRoomId ? ' selected' : '');
-    const lastMsg = r.lastMessage ? `${r.lastMessage.sender}: ${r.lastMessage.text}` : 'No messages yet';
+    let lastMsg = 'No messages yet';
+    if (r.lastMessage) {
+      if (r.lastMessage.image && !r.lastMessage.text) {
+        lastMsg = `${r.lastMessage.sender}: [📷 Photo]`;
+      } else {
+        lastMsg = `${r.lastMessage.sender}: ${r.lastMessage.text}`;
+      }
+    }
     div.innerHTML = `<div class="room-name">${escHtml(r.name)}</div><div class="room-last-msg">${escHtml(lastMsg)}</div>`;
     div.addEventListener('click', () => openRoom(r.id, r.name, r.members));
     list.appendChild(div);
@@ -133,7 +219,7 @@ function openRoom(roomId, name, members) {
   document.getElementById('chat-room-members').textContent = members.join(', ');
 
   // Highlight selected room
-  document.querySelectorAll('.room-item').forEach((el, i) => el.classList.remove('selected'));
+  document.querySelectorAll('.room-item').forEach(el => el.classList.remove('selected'));
   document.querySelectorAll('.room-item').forEach(el => {
     if (el.querySelector('.room-name').textContent === name) el.classList.add('selected');
   });
@@ -152,27 +238,72 @@ function appendMessage(msg) {
   const div = document.createElement('div');
   div.className = 'message' + (msg.sender === myUsername ? ' mine' : '');
   const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  let imageHtml = '';
+  if (msg.image) {
+    imageHtml = `
+      <div class="msg-img-container" onclick="openImageViewer('${msg.image}')">
+        <img class="msg-img-preview" src="${msg.image}" alt="Photo" />
+      </div>
+    `;
+  }
+
+  let textHtml = '';
+  if (msg.text) {
+    textHtml = `<div class="msg-bubble">${escHtml(msg.text)}</div>`;
+  }
+
   div.innerHTML = `
     <div class="msg-sender">${escHtml(msg.sender)}</div>
-    <div class="msg-bubble">${escHtml(msg.text)}</div>
+    ${textHtml}
+    ${imageHtml}
     <div class="msg-time">${time}</div>
   `;
   area.appendChild(div);
   area.scrollTop = area.scrollHeight;
 }
 
-// Send message
+// Send message (with Korean / CJK IME composition handling)
+const msgInput = document.getElementById('message-input');
+let isImeComposing = false;
+
+msgInput.addEventListener('compositionstart', () => {
+  isImeComposing = true;
+});
+
+msgInput.addEventListener('compositionend', () => {
+  isImeComposing = false;
+});
+
 document.getElementById('send-msg-btn').addEventListener('click', sendMessage);
-document.getElementById('message-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') sendMessage();
+
+msgInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    // If Korean IME is actively composing a syllable, ignore Enter so it doesn't double send!
+    if (e.isComposing || isImeComposing || e.keyCode === 229) {
+      return;
+    }
+    e.preventDefault();
+    sendMessage();
+  }
 });
 
 function sendMessage() {
   const input = document.getElementById('message-input');
   const text = input.value.trim();
   if (!text || !currentRoomId) return;
-  socket.emit('send-message', { roomId: currentRoomId, text });
+
+  // Clear immediately
   input.value = '';
+
+  // Safety cleanup: in case macOS Korean IME dumps the last composed character right after Enter
+  setTimeout(() => {
+    if (input.value) {
+      input.value = '';
+    }
+  }, 10);
+
+  socket.emit('send-message', { roomId: currentRoomId, text, image: null });
 }
 
 // Receive messages in real-time
@@ -180,13 +311,88 @@ socket.on('new-message', ({ roomId, message }) => {
   if (roomId === currentRoomId) {
     appendMessage(message);
   }
-  // Refresh room list to update ordering
   loadRooms();
 });
 
-// New room created
-socket.on('room-created', () => {
-  loadRooms();
+// Image Upload in Chat
+const chatFileInput = document.getElementById('chat-file-input');
+const chatImageBtn = document.getElementById('chat-image-btn');
+
+chatImageBtn.addEventListener('click', () => {
+  if (!currentRoomId) { alert('Select a chat room first.'); return; }
+  chatFileInput.click();
+});
+
+chatFileInput.addEventListener('change', () => {
+  const file = chatFileInput.files[0];
+  if (file && currentRoomId) {
+    processAndSendImage(file);
+    chatFileInput.value = '';
+  }
+});
+
+// Clipboard Paste Support (Cmd+V / Ctrl+V to paste screenshot)
+document.getElementById('message-input').addEventListener('paste', (e) => {
+  if (!currentRoomId) return;
+  const items = (e.clipboardData || e.originalEvent.clipboardData).items;
+  for (const item of items) {
+    if (item.type.indexOf('image') !== -1) {
+      const file = item.getAsFile();
+      processAndSendImage(file);
+      e.preventDefault();
+      break;
+    }
+  }
+});
+
+// Helper: Compress image to avoid massive payloads over WebSockets
+function processAndSendImage(file) {
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const img = new Image();
+    img.onload = () => {
+      const maxDim = 900;
+      let w = img.width;
+      let h = img.height;
+      if (w > maxDim || h > maxDim) {
+        if (w > h) {
+          h = Math.round((h * maxDim) / w);
+          w = maxDim;
+        } else {
+          w = Math.round((w * maxDim) / h);
+          h = maxDim;
+        }
+      }
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = w;
+      offCanvas.height = h;
+      const oCtx = offCanvas.getContext('2d');
+      oCtx.drawImage(img, 0, 0, w, h);
+      const dataUrl = offCanvas.toDataURL('image/jpeg', 0.8);
+
+      socket.emit('send-message', {
+        roomId: currentRoomId,
+        text: '',
+        image: dataUrl,
+      });
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+// Image Viewer Modal
+window.openImageViewer = function(src) {
+  document.getElementById('image-viewer-img').src = src;
+  document.getElementById('image-viewer-modal').classList.remove('hidden');
+};
+document.getElementById('image-viewer-close').addEventListener('click', () => {
+  document.getElementById('image-viewer-modal').classList.add('hidden');
+});
+document.getElementById('image-viewer-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'image-viewer-modal') {
+    document.getElementById('image-viewer-modal').classList.add('hidden');
+  }
 });
 
 // ---- New Chat Modal ----
@@ -225,7 +431,6 @@ document.getElementById('modal-chat-create').addEventListener('click', () => {
   });
 });
 
-// ---- Call from chat ----
 document.getElementById('chat-call-btn').addEventListener('click', () => {
   if (!currentRoomId) return;
   const membersText = document.getElementById('chat-room-members').textContent;
@@ -234,7 +439,7 @@ document.getElementById('chat-call-btn').addEventListener('click', () => {
 });
 
 // ============================================================
-//  CALLS
+//  CALLS & WEBRTC (Reliable NAT Traversal + Auto End on 1 Peer)
 // ============================================================
 function loadCallHistory() {
   socket.emit('get-call-history', (history) => {
@@ -261,7 +466,7 @@ function loadCallHistory() {
   });
 }
 
-// ---- Start Call Modal ----
+// Start Call Modal
 document.getElementById('start-call-btn').addEventListener('click', () => {
   socket.emit('get-all-users', (users) => {
     allUsers = users;
@@ -290,26 +495,32 @@ document.getElementById('modal-call-start').addEventListener('click', () => {
   startCall(participants);
 });
 
-// ---- Incoming call notification ----
-socket.on('incoming-call', ({ callId, caller, participants }) => {
+socket.on('incoming-call', ({ callId, caller }) => {
   const accept = confirm(`📞 Incoming call from ${caller}! Join?`);
   if (accept) {
     joinCall(callId);
   }
 });
 
-// ============================================================
-//  WebRTC — Video Calling
-// ============================================================
+// Automatic call termination when only 1 user remains
+socket.on('call-ended-auto', ({ message }) => {
+  alert(message || 'Everyone else has left the call. Call ended.');
+  endCall();
+});
+
 async function startCall(participants) {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
   } catch (err) {
-    alert('Could not access camera/microphone. Please allow permissions and try again.');
+    alert('Could not access camera/microphone. Please allow camera & microphone permissions in your browser.');
     return;
   }
 
-  document.getElementById('local-video').srcObject = localStream;
+  const localVideo = document.getElementById('local-video');
+  localVideo.srcObject = localStream;
+  localVideo.muted = true; // Avoid feedback
+  localVideo.play().catch(e => console.warn(e));
+
   document.getElementById('call-overlay').classList.remove('hidden');
   micEnabled = true;
   camEnabled = true;
@@ -326,12 +537,16 @@ async function joinCall(callId) {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
   } catch (err) {
-    alert('Could not access camera/microphone.');
+    alert('Could not access camera/microphone. Please check browser permissions.');
     return;
   }
 
   currentCallId = callId;
-  document.getElementById('local-video').srcObject = localStream;
+  const localVideo = document.getElementById('local-video');
+  localVideo.srcObject = localStream;
+  localVideo.muted = true;
+  localVideo.play().catch(e => console.warn(e));
+
   document.getElementById('call-overlay').classList.remove('hidden');
   micEnabled = true;
   camEnabled = true;
@@ -339,10 +554,15 @@ async function joinCall(callId) {
   socket.emit('join-call', { callId }, (res) => {
     if (res.success) {
       document.getElementById('call-status').textContent = `In Call`;
-      // Create peer connections with existing peers
+      // New joiner creates peer connections with isInitiator = false.
+      // Existing peers will receive 'peer-joined' and send the offer to the newcomer.
+      // This completely prevents WebRTC glare!
       res.peers.forEach(peer => {
-        createPeerConnection(peer, true);
+        createPeerConnection(peer, false);
       });
+    } else {
+      alert(res.message || 'Could not join call.');
+      endCall();
     }
   });
 }
@@ -352,21 +572,32 @@ function createPeerConnection(peerUsername, isInitiator) {
 
   const pc = new RTCPeerConnection(ICE_SERVERS);
   peerConnections[peerUsername] = pc;
+  iceCandidateQueue[peerUsername] = [];
 
-  // Add local tracks
-  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+  // Add all local audio & video tracks
+  if (localStream) {
+    localStream.getTracks().forEach(track => {
+      pc.addTrack(track, localStream);
+    });
+  }
 
-  // Handle incoming remote tracks
+  // Handle remote video and audio streams
   pc.ontrack = (event) => {
     let videoBox = document.getElementById('video-' + peerUsername);
     if (!videoBox) {
       videoBox = document.createElement('div');
       videoBox.className = 'video-box';
       videoBox.id = 'video-' + peerUsername;
-      videoBox.innerHTML = `<video autoplay playsinline></video><span class="video-label">${escHtml(peerUsername)}</span>`;
+      videoBox.innerHTML = `
+        <video autoplay playsinline></video>
+        <span class="video-label">${escHtml(peerUsername)}</span>
+      `;
       document.getElementById('videos-grid').appendChild(videoBox);
     }
-    videoBox.querySelector('video').srcObject = event.streams[0];
+    const remoteVideo = videoBox.querySelector('video');
+    remoteVideo.srcObject = event.streams[0];
+    remoteVideo.muted = false; // ensure remote audio is unmuted!
+    remoteVideo.play().catch(e => console.warn('Autoplay prevented:', e));
     document.getElementById('call-status').textContent = `In Call`;
   };
 
@@ -387,9 +618,9 @@ function createPeerConnection(peerUsername, isInitiator) {
     }
   };
 
-  // If we're the initiator, create and send an offer
+  // Existing peer creates offer to new joiner
   if (isInitiator) {
-    pc.createOffer()
+    pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
       .then(offer => pc.setLocalDescription(offer))
       .then(() => {
         socket.emit('webrtc-offer', {
@@ -397,35 +628,67 @@ function createPeerConnection(peerUsername, isInitiator) {
           to: peerUsername,
           offer: pc.localDescription,
         });
-      });
+      })
+      .catch(err => console.error('Error creating offer:', err));
   }
 }
 
-// Handle WebRTC signaling messages
+// Receive offer from existing peer
 socket.on('webrtc-offer', async ({ callId, from, offer }) => {
   createPeerConnection(from, false);
   const pc = peerConnections[from];
-  await pc.setRemoteDescription(new RTCSessionDescription(offer));
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  socket.emit('webrtc-answer', { callId, to: from, answer: pc.localDescription });
-});
-
-socket.on('webrtc-answer', async ({ callId, from, answer }) => {
-  const pc = peerConnections[from];
-  if (pc) {
-    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  try {
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    // Drain queued ICE candidates
+    if (iceCandidateQueue[from] && iceCandidateQueue[from].length > 0) {
+      for (const cand of iceCandidateQueue[from]) {
+        await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => console.warn(e));
+      }
+      iceCandidateQueue[from] = [];
+    }
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    socket.emit('webrtc-answer', { callId, to: from, answer: pc.localDescription });
+  } catch (err) {
+    console.error('Error handling WebRTC offer:', err);
   }
 });
 
-socket.on('webrtc-ice-candidate', async ({ callId, from, candidate }) => {
+// Receive answer
+socket.on('webrtc-answer', async ({ from, answer }) => {
   const pc = peerConnections[from];
   if (pc) {
-    await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      // Drain queued ICE candidates
+      if (iceCandidateQueue[from] && iceCandidateQueue[from].length > 0) {
+        for (const cand of iceCandidateQueue[from]) {
+          await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => console.warn(e));
+        }
+        iceCandidateQueue[from] = [];
+      }
+    } catch (err) {
+      console.error('Error setting remote answer:', err);
+    }
   }
 });
 
-// A new peer joined the call
+// Receive ICE candidate with buffering
+socket.on('webrtc-ice-candidate', async ({ from, candidate }) => {
+  const pc = peerConnections[from];
+  if (pc && pc.remoteDescription && pc.remoteDescription.type) {
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (err) {
+      console.warn('Error adding ICE candidate:', err);
+    }
+  } else {
+    if (!iceCandidateQueue[from]) iceCandidateQueue[from] = [];
+    iceCandidateQueue[from].push(candidate);
+  }
+});
+
+// A new peer joined the call -> existing peers initiate the offer
 socket.on('peer-joined', ({ callId, username }) => {
   if (callId === currentCallId) {
     createPeerConnection(username, true);
@@ -444,21 +707,32 @@ function removePeer(username) {
     peerConnections[username].close();
     delete peerConnections[username];
   }
+  delete iceCandidateQueue[username];
   const box = document.getElementById('video-' + username);
   if (box) box.remove();
+
+  // If no more peers in call, automatically end call!
+  if (currentCallId && Object.keys(peerConnections).length === 0) {
+    alert('Everyone else has left the call. Call ended.');
+    endCall();
+  }
 }
 
-// ---- Call controls ----
+// Controls
 document.getElementById('toggle-mic').addEventListener('click', () => {
   micEnabled = !micEnabled;
-  localStream.getAudioTracks().forEach(t => t.enabled = micEnabled);
+  if (localStream) {
+    localStream.getAudioTracks().forEach(t => t.enabled = micEnabled);
+  }
   document.getElementById('toggle-mic').classList.toggle('muted', !micEnabled);
   document.getElementById('toggle-mic').textContent = micEnabled ? '🎤' : '🔇';
 });
 
 document.getElementById('toggle-cam').addEventListener('click', () => {
   camEnabled = !camEnabled;
-  localStream.getVideoTracks().forEach(t => t.enabled = camEnabled);
+  if (localStream) {
+    localStream.getVideoTracks().forEach(t => t.enabled = camEnabled);
+  }
   document.getElementById('toggle-cam').classList.toggle('muted', !camEnabled);
   document.getElementById('toggle-cam').textContent = camEnabled ? '📷' : '📷❌';
 });
@@ -474,6 +748,8 @@ function endCall() {
 
   // Close all peer connections
   Object.keys(peerConnections).forEach(removePeer);
+  peerConnections = {};
+  iceCandidateQueue = {};
 
   // Stop local media
   if (localStream) {
@@ -481,10 +757,8 @@ function endCall() {
     localStream = null;
   }
 
-  // Clean up UI
   document.getElementById('call-overlay').classList.add('hidden');
   document.getElementById('local-video').srcObject = null;
-  // Remove remote video boxes
   document.querySelectorAll('#videos-grid .video-box:not(#local-video-box)').forEach(el => el.remove());
 
   currentCallId = null;
@@ -497,9 +771,7 @@ function endCall() {
 const canvas = document.getElementById('game-canvas');
 const ctx = canvas.getContext('2d');
 
-let activeGameCleanup = null;
-
-// ---- Web Audio API for arcade sounds (no download needed!) ----
+// ---- Web Audio API for arcade sounds ----
 let audioCtx = null;
 function getAudioContext() {
   if (!audioCtx) {
@@ -518,13 +790,12 @@ function playSound(type) {
   const now = ac.currentTime;
 
   if (type === 'apple-match') {
-    // Cheerful high double chime
     const o1 = ac.createOscillator();
     const g1 = ac.createGain();
     o1.type = 'triangle';
-    o1.frequency.setValueAtTime(523.25, now);       // C5
-    o1.frequency.setValueAtTime(659.25, now + 0.08); // E5
-    o1.frequency.setValueAtTime(783.99, now + 0.16); // G5
+    o1.frequency.setValueAtTime(523.25, now);
+    o1.frequency.setValueAtTime(659.25, now + 0.08);
+    o1.frequency.setValueAtTime(783.99, now + 0.16);
     g1.gain.setValueAtTime(0.2, now);
     g1.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
     o1.connect(g1);
@@ -532,7 +803,6 @@ function playSound(type) {
     o1.start(now);
     o1.stop(now + 0.35);
   } else if (type === 'flap') {
-    // Soft swoosh chirp
     const o = ac.createOscillator();
     const g = ac.createGain();
     o.type = 'sine';
@@ -544,13 +814,12 @@ function playSound(type) {
     g.connect(ac.destination);
     o.start(now);
     o.stop(now + 0.1);
-  } else if (type === 'point') {
-    // Coin sound
+  } else if (type === 'point' || type === 'coin') {
     const o = ac.createOscillator();
     const g = ac.createGain();
     o.type = 'square';
-    o.frequency.setValueAtTime(987.77, now); // B5
-    o.frequency.setValueAtTime(1318.51, now + 0.08); // E6
+    o.frequency.setValueAtTime(987.77, now);
+    o.frequency.setValueAtTime(1318.51, now + 0.08);
     g.gain.setValueAtTime(0.1, now);
     g.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
     o.connect(g);
@@ -558,7 +827,6 @@ function playSound(type) {
     o.start(now);
     o.stop(now + 0.28);
   } else if (type === 'hit') {
-    // Soft low thump
     const o = ac.createOscillator();
     const g = ac.createGain();
     o.type = 'sawtooth';
@@ -584,16 +852,25 @@ function stopActiveGame() {
   }
 }
 
-// ---- Arcade navigation buttons ----
+// Arcade Navigation
 document.querySelectorAll('.play-btn').forEach(btn => {
   btn.addEventListener('click', () => {
     const game = btn.dataset.game;
     currentGame = game;
+
+    if (game === 'gartic') {
+      openGarticPhone();
+      return;
+    }
+
     document.getElementById('arcade-menu').classList.add('hidden');
+    document.getElementById('gartic-area').classList.add('hidden');
     document.getElementById('game-area').classList.remove('hidden');
     document.getElementById('game-over-overlay').classList.add('hidden');
+
     if (game === 'apple') startAppleGame();
     else if (game === 'flappy') startFlappyGame();
+    else if (game === 'runner') startSubwayRunnerGame();
   });
 });
 
@@ -617,12 +894,14 @@ document.getElementById('restart-game-btn').addEventListener('click', () => {
   document.getElementById('game-over-overlay').classList.add('hidden');
   if (currentGame === 'apple') startAppleGame();
   else if (currentGame === 'flappy') startFlappyGame();
+  else if (currentGame === 'runner') startSubwayRunnerGame();
 });
 
 document.getElementById('restart-game-top-btn').addEventListener('click', () => {
   document.getElementById('game-over-overlay').classList.add('hidden');
   if (currentGame === 'apple') startAppleGame();
   else if (currentGame === 'flappy') startFlappyGame();
+  else if (currentGame === 'runner') startSubwayRunnerGame();
 });
 
 function showGameOver(score, customTitle = 'Game Over', customMsg = null) {
@@ -633,13 +912,17 @@ function showGameOver(score, customTitle = 'Game Over', customMsg = null) {
   } else {
     document.getElementById('game-over-msg').innerHTML = `Final Score: <span id="final-score">${score}</span>`;
   }
+
+  // Submit to leaderboard
+  if (currentGame) {
+    submitGameScore(currentGame, score);
+  }
+
   document.getElementById('game-over-overlay').classList.remove('hidden');
 }
 
 // ============================================================
 //  GAME 1: FRUIT BOX (사과 게임 - Fruit Box Game)
-//  Rule: Drag a rectangle over apples whose numbers sum to 10!
-//  Board: 17 columns x 10 rows (170 apples). Timer: 120 seconds.
 // ============================================================
 function startAppleGame() {
   stopActiveGame();
@@ -650,7 +933,6 @@ function startAppleGame() {
   timerDisplay.classList.remove('hidden');
   document.getElementById('game-score-display').textContent = 'Score: 0';
 
-  // Canvas size for Fruit Box
   const W = 880;
   const H = 520;
   canvas.width = W;
@@ -666,19 +948,17 @@ function startAppleGame() {
 
   let score = 0;
   let remainingApples = COLS * ROWS;
-  const GAME_DURATION = 120; // 120 seconds
+  const GAME_DURATION = 120;
   let startTime = Date.now();
   let timeLeft = GAME_DURATION;
   let gameActive = true;
 
-  // Generate grid with random numbers 1 to 9
   const grid = [];
   for (let r = 0; r < ROWS; r++) {
     const row = [];
     for (let c = 0; c < COLS; c++) {
       row.push({
-        r,
-        c,
+        r, c,
         val: Math.floor(Math.random() * 9) + 1,
         cleared: false,
       });
@@ -686,10 +966,7 @@ function startAppleGame() {
     grid.push(row);
   }
 
-  // Floating score popups animation
   const popups = [];
-
-  // Drag selection state
   let isDragging = false;
   let dragStart = { x: 0, y: 0 };
   let dragCurrent = { x: 0, y: 0 };
@@ -719,11 +996,10 @@ function startAppleGame() {
     dragCurrent = getCanvasCoords(e);
   }
 
-  function onMouseUp(e) {
+  function onMouseUp() {
     if (!isDragging || !gameActive) return;
     isDragging = false;
 
-    // Check selected apples
     const selected = getSelectedApples();
     if (selected.length === 0) return;
 
@@ -731,30 +1007,20 @@ function startAppleGame() {
     selected.forEach(a => sum += a.val);
 
     if (sum === 10) {
-      // Success! Clear apples
-      selected.forEach(a => {
-        a.cleared = true;
-      });
+      selected.forEach(a => a.cleared = true);
       const clearedCount = selected.length;
       score += clearedCount;
       remainingApples -= clearedCount;
       document.getElementById('game-score-display').textContent = `Score: ${score}`;
       playSound('apple-match');
 
-      // Add floating score popup
       const midX = (dragStart.x + dragCurrent.x) / 2;
       const midY = (dragStart.y + dragCurrent.y) / 2;
-      popups.push({
-        x: midX,
-        y: midY,
-        text: `+${clearedCount}`,
-        alpha: 1.0,
-      });
+      popups.push({ x: midX, y: midY, text: `+${clearedCount}`, alpha: 1.0 });
 
-      // Win condition: cleared entire board
       if (remainingApples <= 0) {
         gameActive = false;
-        showGameOver(score, '🎉 Perfect Clear!', `Amazing! You cleared all apples! Score: ${score}`);
+        showGameOver(score, '🎉 Perfect Clear!', `Cleared all apples! Score: ${score}`);
       }
     }
   }
@@ -777,7 +1043,6 @@ function startAppleGame() {
     canvas.style.cursor = 'default';
   };
 
-  // Helper: find all active apples inside current selection box
   function getSelectedApples() {
     const minX = Math.min(dragStart.x, dragCurrent.x);
     const maxX = Math.max(dragStart.x, dragCurrent.x);
@@ -802,15 +1067,12 @@ function startAppleGame() {
     return selected;
   }
 
-  // Draw an individual apple
   function drawApple(x, y, w, h, val, isSelected) {
     const cx = x + w / 2;
     const cy = y + h / 2 + 3;
     const r = Math.min(w, h) * 0.42;
 
     ctx.save();
-
-    // Stem
     ctx.strokeStyle = '#6d4c41';
     ctx.lineWidth = 2.5;
     ctx.lineCap = 'round';
@@ -819,19 +1081,16 @@ function startAppleGame() {
     ctx.quadraticCurveTo(cx + 3, cy - r - 6, cx + 5, cy - r - 8);
     ctx.stroke();
 
-    // Leaf
     ctx.fillStyle = '#4cd137';
     ctx.beginPath();
     ctx.ellipse(cx + 4, cy - r - 4, 4.5, 2.5, Math.PI / 4, 0, Math.PI * 2);
     ctx.fill();
 
-    // Selection glow
     if (isSelected) {
       ctx.shadowColor = '#ffeaa7';
       ctx.shadowBlur = 10;
     }
 
-    // Apple body (Glossy red with gradient)
     const grad = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.15, cx, cy, r);
     if (isSelected) {
       grad.addColorStop(0, '#ff7675');
@@ -845,26 +1104,20 @@ function startAppleGame() {
     ctx.fillStyle = grad;
 
     ctx.beginPath();
-    // Heart-like apple lobes
     ctx.arc(cx - r * 0.35, cy, r * 0.75, 0, Math.PI * 2);
     ctx.arc(cx + r * 0.35, cy, r * 0.75, 0, Math.PI * 2);
     ctx.fill();
 
-    // Top shine highlight
     ctx.shadowBlur = 0;
     ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
     ctx.beginPath();
     ctx.ellipse(cx - r * 0.4, cy - r * 0.35, r * 0.3, r * 0.15, -Math.PI / 6, 0, Math.PI * 2);
     ctx.fill();
 
-    // Number
     ctx.fillStyle = '#ffffff';
     ctx.font = 'bold 20px "Segoe UI", Arial, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
-    ctx.shadowBlur = 2;
-    ctx.shadowOffsetY = 1;
     ctx.fillText(val, cx, cy + 1);
 
     ctx.restore();
@@ -873,7 +1126,6 @@ function startAppleGame() {
   function update() {
     if (!gameActive) return;
 
-    // Timer calculation
     const elapsed = (Date.now() - startTime) / 1000;
     timeLeft = Math.max(0, GAME_DURATION - elapsed);
     timerDisplay.textContent = `⏱️ ${Math.ceil(timeLeft)}s`;
@@ -885,7 +1137,6 @@ function startAppleGame() {
       showGameOver(score, "Time's Up!", `You cleared <strong>${score}</strong> apples out of 170!`);
     }
 
-    // Update floating popups
     for (let i = popups.length - 1; i >= 0; i--) {
       popups[i].y -= 1;
       popups[i].alpha -= 0.025;
@@ -896,20 +1147,15 @@ function startAppleGame() {
   function draw() {
     ctx.clearRect(0, 0, W, H);
 
-    // Frame border (green board style like the screenshot)
     ctx.fillStyle = '#20bf6b';
     roundRect(ctx, 0, 0, W, H, 16);
     ctx.fill();
 
-    // Inner board area (light mint grid background)
     const boardPadding = 12;
-    const boardW = W - boardPadding * 2;
-    const boardH = H - boardPadding * 2;
     ctx.fillStyle = '#eafaf1';
-    roundRect(ctx, boardPadding, boardPadding, boardW, boardH, 10);
+    roundRect(ctx, boardPadding, boardPadding, W - boardPadding * 2, H - boardPadding * 2, 10);
     ctx.fill();
 
-    // Subtle checkered grid lines
     ctx.strokeStyle = '#d5f5e3';
     ctx.lineWidth = 1;
     for (let c = 0; c <= COLS; c++) {
@@ -927,11 +1173,9 @@ function startAppleGame() {
       ctx.stroke();
     }
 
-    // Selected apples set for fast lookup
     const selectedApples = isDragging ? getSelectedApples() : [];
     const selectedSet = new Set(selectedApples);
 
-    // Draw apples
     for (let r = 0; r < ROWS; r++) {
       for (let c = 0; c < COLS; c++) {
         const apple = grid[r][c];
@@ -942,7 +1186,6 @@ function startAppleGame() {
       }
     }
 
-    // Draw selection rectangle & tooltip
     if (isDragging) {
       const minX = Math.min(dragStart.x, dragCurrent.x);
       const maxX = Math.max(dragStart.x, dragCurrent.x);
@@ -955,7 +1198,6 @@ function startAppleGame() {
       selectedApples.forEach(a => currentSum += a.val);
       const isTen = currentSum === 10;
 
-      // Box fill & border
       ctx.fillStyle = isTen ? 'rgba(46, 213, 115, 0.25)' : 'rgba(78, 140, 255, 0.2)';
       ctx.fillRect(minX, minY, selW, selH);
 
@@ -965,7 +1207,6 @@ function startAppleGame() {
       ctx.strokeRect(minX, minY, selW, selH);
       ctx.setLineDash([]);
 
-      // Floating Sum Tooltip
       if (selectedApples.length > 0) {
         const tipText = isTen ? `Sum: 10 ✨` : `Sum: ${currentSum}`;
         ctx.font = 'bold 15px "Segoe UI", sans-serif';
@@ -984,19 +1225,17 @@ function startAppleGame() {
       }
     }
 
-    // Right-side vertical timer bar (like the screenshot!)
+    // Gauge bar
     const gaugeX = gridX + COLS * cellW + 28;
     const gaugeY = gridY + 20;
     const gaugeW = 16;
     const gaugeH = ROWS * cellH - 40;
 
-    // Timer gauge border
     ctx.strokeStyle = '#2ed573';
     ctx.lineWidth = 2;
     roundRect(ctx, gaugeX, gaugeY, gaugeW, gaugeH, 8);
     ctx.stroke();
 
-    // Timer gauge fill
     const progress = Math.max(0, Math.min(1, timeLeft / GAME_DURATION));
     const fillH = gaugeH * progress;
     const fillY = gaugeY + (gaugeH - fillH);
@@ -1009,19 +1248,15 @@ function startAppleGame() {
     roundRect(ctx, gaugeX + 2, fillY + 2, gaugeW - 4, fillH - 4, 6);
     ctx.fill();
 
-    // Score display in top right
     ctx.fillStyle = '#2f3542';
     ctx.font = 'bold 18px "Segoe UI", sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(`${score}`, gaugeX + gaugeW / 2, gaugeY - 14);
 
-    // Draw floating popups
     popups.forEach(p => {
       ctx.save();
       ctx.font = 'bold 24px "Segoe UI", sans-serif';
       ctx.fillStyle = `rgba(46, 213, 115, ${p.alpha})`;
-      ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
-      ctx.shadowBlur = 4;
       ctx.textAlign = 'center';
       ctx.fillText(p.text, p.x, p.y);
       ctx.restore();
@@ -1041,8 +1276,6 @@ function startAppleGame() {
 
 // ============================================================
 //  GAME 2: FLAPPY BIRD
-//  Bird is 4x bigger (~80px), clean game over, stops score,
-//  and easy replay & back buttons!
 // ============================================================
 function startFlappyGame() {
   stopActiveGame();
@@ -1052,7 +1285,6 @@ function startFlappyGame() {
   document.getElementById('game-timer-display').classList.add('hidden');
   document.getElementById('game-score-display').textContent = 'Score: 0';
 
-  // Canvas size for Flappy Bird
   const W = 460;
   const H = 600;
   canvas.width = W;
@@ -1063,21 +1295,20 @@ function startFlappyGame() {
   let gameActive = true;
   let started = false;
 
-  // 4x bigger bird! (Width 74, Height 54)
   const bird = {
     x: 100,
     y: H / 2 - 20,
     vy: 0,
     w: 74,
     h: 54,
-    hitRadius: 26, // fair circular collision radius
+    hitRadius: 26,
     wingAngle: 0,
   };
 
   const gravity = 0.38;
   const flapStrength = -7.5;
   const pipeSpeed = 2.6;
-  const pipeGap = 190;   // Generous gap for the larger bird!
+  const pipeGap = 190;
   const pipeWidth = 68;
   const pipes = [];
   let pipeTimer = 0;
@@ -1141,49 +1372,37 @@ function startFlappyGame() {
 
     bird.vy += gravity;
     bird.y += bird.vy;
-
-    // Wing flapping animation
     bird.wingAngle += 0.25;
 
-    // Spawn pipes
     pipeTimer++;
     if (pipeTimer > 105) {
       spawnPipe();
       pipeTimer = 0;
     }
 
-    // Move pipes
     for (let i = pipes.length - 1; i >= 0; i--) {
       pipes[i].x -= pipeSpeed;
-
-      // Scoring
       if (!pipes[i].scored && pipes[i].x + pipeWidth < bird.x) {
         score++;
         pipes[i].scored = true;
         document.getElementById('game-score-display').textContent = `Score: ${score}`;
         playSound('point');
       }
-
-      // Remove off-screen pipes
       if (pipes[i].x + pipeWidth < -10) {
         pipes.splice(i, 1);
       }
     }
 
-    // Floor & ceiling collision
     if (bird.y + bird.hitRadius >= H - groundH || bird.y - bird.hitRadius <= 0) {
       triggerGameOver();
       return;
     }
 
-    // Pipe collision using circle-rect collision detection
     for (const p of pipes) {
-      // Check top pipe
       if (circleRectOverlap(bird.x, bird.y, bird.hitRadius, p.x, 0, pipeWidth, p.topH)) {
         triggerGameOver();
         return;
       }
-      // Check bottom pipe
       if (circleRectOverlap(bird.x, bird.y, bird.hitRadius, p.x, p.bottomY, pipeWidth, H - groundH - p.bottomY)) {
         triggerGameOver();
         return;
@@ -1199,16 +1418,12 @@ function startFlappyGame() {
     return (dx * dx + dy * dy) < (r * r);
   }
 
-  // Draw bird
   function drawBird(x, y, vy) {
     ctx.save();
     ctx.translate(x, y);
-
-    // Rotate bird based on velocity
     const angle = Math.min(Math.max(vy * 3.5, -25), 70) * Math.PI / 180;
     ctx.rotate(angle);
 
-    // Body (Yellow oval with nice gradient)
     const bodyGrad = ctx.createRadialGradient(-5, -6, 8, 0, 0, 36);
     bodyGrad.addColorStop(0, '#ffeaa7');
     bodyGrad.addColorStop(0.7, '#f1c40f');
@@ -1222,13 +1437,11 @@ function startFlappyGame() {
     ctx.lineWidth = 2.5;
     ctx.stroke();
 
-    // Belly (light cream)
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.ellipse(4, 8, 20, 14, -0.2, 0, Math.PI * 2);
     ctx.fill();
 
-    // Wing
     ctx.save();
     const wingFlap = Math.sin(bird.wingAngle) * 8;
     ctx.translate(-14, 0);
@@ -1242,7 +1455,6 @@ function startFlappyGame() {
     ctx.stroke();
     ctx.restore();
 
-    // Big expressive cartoon eye
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.arc(16, -10, 11, 0, Math.PI * 2);
@@ -1251,19 +1463,16 @@ function startFlappyGame() {
     ctx.lineWidth = 2;
     ctx.stroke();
 
-    // Pupil
     ctx.fillStyle = '#000000';
     ctx.beginPath();
     ctx.arc(19, -10, 5, 0, Math.PI * 2);
     ctx.fill();
 
-    // Eye highlight
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.arc(17.5, -12, 2.5, 0, Math.PI * 2);
     ctx.fill();
 
-    // Beak (Orange)
     ctx.fillStyle = '#e67e22';
     ctx.beginPath();
     ctx.moveTo(25, -2);
@@ -1281,7 +1490,6 @@ function startFlappyGame() {
   function draw() {
     ctx.clearRect(0, 0, W, H);
 
-    // Sky gradient
     const sky = ctx.createLinearGradient(0, 0, 0, H - groundH);
     sky.addColorStop(0, '#4fc3f7');
     sky.addColorStop(0.7, '#81d4fa');
@@ -1289,27 +1497,10 @@ function startFlappyGame() {
     ctx.fillStyle = sky;
     ctx.fillRect(0, 0, W, H - groundH);
 
-    // Background distant clouds
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
-    ctx.beginPath();
-    ctx.arc(80, 100, 30, 0, Math.PI * 2);
-    ctx.arc(115, 95, 40, 0, Math.PI * 2);
-    ctx.arc(155, 100, 30, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.arc(320, 160, 24, 0, Math.PI * 2);
-    ctx.arc(350, 155, 34, 0, Math.PI * 2);
-    ctx.arc(385, 160, 24, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Draw Pipes
     pipes.forEach(p => {
-      // Top Pipe body
       const topGrad = ctx.createLinearGradient(p.x, 0, p.x + pipeWidth, 0);
       topGrad.addColorStop(0, '#55efc4');
       topGrad.addColorStop(0.3, '#00b894');
-      topGrad.addColorStop(0.8, '#00a884');
       topGrad.addColorStop(1, '#006266');
 
       ctx.fillStyle = topGrad;
@@ -1318,28 +1509,21 @@ function startFlappyGame() {
       ctx.lineWidth = 2.5;
       ctx.strokeRect(p.x, 0, pipeWidth, p.topH);
 
-      // Top pipe cap lip
       const lipH = 26;
       ctx.fillRect(p.x - 4, p.topH - lipH, pipeWidth + 8, lipH);
       ctx.strokeRect(p.x - 4, p.topH - lipH, pipeWidth + 8, lipH);
 
-      // Bottom Pipe body
       const bottomH = H - groundH - p.bottomY;
       ctx.fillRect(p.x, p.bottomY, pipeWidth, bottomH);
       ctx.strokeRect(p.x, p.bottomY, pipeWidth, bottomH);
-
-      // Bottom pipe cap lip
       ctx.fillRect(p.x - 4, p.bottomY, pipeWidth + 8, lipH);
       ctx.strokeRect(p.x - 4, p.bottomY, pipeWidth + 8, lipH);
     });
 
-    // Draw Bird
     if (!started) {
-      // Gentle hovering wave before start
       const hoverY = bird.y + Math.sin(Date.now() / 250) * 8;
       drawBird(bird.x, hoverY, 0);
 
-      // Start prompt
       ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
       roundRect(ctx, W / 2 - 140, H / 2 + 50, 280, 50, 12);
       ctx.fill();
@@ -1352,7 +1536,6 @@ function startFlappyGame() {
       drawBird(bird.x, bird.y, bird.vy);
     }
 
-    // Ground
     ctx.fillStyle = '#e58e26';
     ctx.fillRect(0, H - groundH, W, groundH);
     ctx.fillStyle = '#78e08f';
@@ -1361,7 +1544,6 @@ function startFlappyGame() {
     ctx.lineWidth = 2;
     ctx.strokeRect(0, H - groundH, W, 12);
 
-    // In-game score at top
     if (started) {
       ctx.font = 'bold 44px "Segoe UI", Arial, sans-serif';
       ctx.fillStyle = '#ffffff';
@@ -1384,7 +1566,715 @@ function startFlappyGame() {
   loop();
 }
 
-// Helper: rounded rectangle on canvas
+// ============================================================
+//  GAME 3: SUBWAY RUNNER (3-Lane Track Runner)
+// ============================================================
+function startSubwayRunnerGame() {
+  stopActiveGame();
+  currentGame = 'runner';
+
+  document.getElementById('game-title').textContent = '🛹 Subway Runner';
+  document.getElementById('game-timer-display').classList.add('hidden');
+  document.getElementById('game-score-display').textContent = 'Score: 0';
+
+  const W = 480;
+  const H = 600;
+  canvas.width = W;
+  canvas.height = H;
+  canvas.style.cursor = 'default';
+
+  let score = 0;
+  let coinsCount = 0;
+  let distance = 0;
+  let gameSpeed = 5.5;
+  let gameActive = true;
+  let started = false;
+
+  // 3 Lanes: 0 = Left, 1 = Center, 2 = Right
+  const lanesX = [120, 240, 360];
+  const horizonY = 170;
+  const horizonW = 90;
+
+  const player = {
+    lane: 1,
+    targetX: 240,
+    currentX: 240,
+    yOffset: 0,
+    vy: 0,
+    isJumping: false,
+    isSliding: false,
+    slideTimer: 0,
+  };
+
+  const obstacles = [];  // { lane, z, type: 'train' | 'barrier-low' | 'barrier-high' }
+  const coins = [];      // { lane, z, collected: false }
+  let spawnTimer = 0;
+
+  function moveLeft() {
+    if (!started) started = true;
+    if (player.lane > 0) {
+      player.lane--;
+      player.targetX = lanesX[player.lane];
+    }
+  }
+
+  function moveRight() {
+    if (!started) started = true;
+    if (player.lane < 2) {
+      player.lane++;
+      player.targetX = lanesX[player.lane];
+    }
+  }
+
+  function jump() {
+    if (!started) started = true;
+    if (!player.isJumping) {
+      player.isJumping = true;
+      player.isSliding = false;
+      player.vy = -14;
+      playSound('flap');
+    }
+  }
+
+  function slide() {
+    if (!started) started = true;
+    if (player.isJumping) {
+      // Fast drop down
+      player.vy = 16;
+    } else {
+      player.isSliding = true;
+      player.slideTimer = 35; // frames
+    }
+  }
+
+  // Keyboard controls
+  function onKeyDown(e) {
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') { e.preventDefault(); moveLeft(); }
+    if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') { e.preventDefault(); moveRight(); }
+    if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W' || e.key === ' ') { e.preventDefault(); jump(); }
+    if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') { e.preventDefault(); slide(); }
+  }
+
+  // Touch Swipe Controls for mobile
+  let touchStartX = 0;
+  let touchStartY = 0;
+
+  function onTouchStart(e) {
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+  }
+
+  function onTouchEnd(e) {
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    const dy = e.changedTouches[0].clientY - touchStartY;
+    if (Math.abs(dx) > Math.abs(dy)) {
+      if (dx < -30) moveLeft();
+      else if (dx > 30) moveRight();
+    } else {
+      if (dy < -30) jump();
+      else if (dy > 30) slide();
+    }
+  }
+
+  window.addEventListener('keydown', onKeyDown);
+  canvas.addEventListener('touchstart', onTouchStart, { passive: true });
+  canvas.addEventListener('touchend', onTouchEnd, { passive: true });
+
+  activeGameCleanup = () => {
+    window.removeEventListener('keydown', onKeyDown);
+    canvas.removeEventListener('touchstart', onTouchStart);
+    canvas.removeEventListener('touchend', onTouchEnd);
+  };
+
+  function spawnWorldObjects() {
+    const types = ['train', 'barrier-low', 'barrier-high'];
+    const chosenType = types[Math.floor(Math.random() * types.length)];
+    const chosenLane = Math.floor(Math.random() * 3);
+
+    obstacles.push({
+      lane: chosenLane,
+      z: 1000,
+      type: chosenType,
+    });
+
+    // Spawn coins in free lane
+    const coinLane = (chosenLane + 1) % 3;
+    for (let i = 0; i < 4; i++) {
+      coins.push({
+        lane: coinLane,
+        z: 950 + i * 40,
+        collected: false,
+      });
+    }
+  }
+
+  function update() {
+    if (!started || !gameActive) return;
+
+    distance += gameSpeed;
+    gameSpeed = Math.min(13, 5.5 + distance * 0.001);
+    score = Math.floor(distance / 5) + coinsCount * 10;
+    document.getElementById('game-score-display').textContent = `Score: ${score}`;
+
+    // Smooth lane shift
+    player.currentX += (player.targetX - player.currentX) * 0.28;
+
+    // Jumping physics
+    if (player.isJumping) {
+      player.yOffset += player.vy;
+      player.vy += 0.8; // gravity
+      if (player.yOffset >= 0) {
+        player.yOffset = 0;
+        player.vy = 0;
+        player.isJumping = false;
+      }
+    }
+
+    // Sliding duration
+    if (player.isSliding) {
+      player.slideTimer--;
+      if (player.slideTimer <= 0) {
+        player.isSliding = false;
+      }
+    }
+
+    // Spawn obstacles
+    spawnTimer++;
+    if (spawnTimer > Math.max(38, 90 - Math.floor(distance * 0.01))) {
+      spawnWorldObjects();
+      spawnTimer = 0;
+    }
+
+    // Move obstacles towards camera
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      const obs = obstacles[i];
+      obs.z -= gameSpeed * 1.8;
+
+      // Collision zone: near player (z between 50 and 100)
+      if (obs.z <= 110 && obs.z >= 50 && obs.lane === player.lane) {
+        let safe = false;
+        if (obs.type === 'barrier-low' && player.yOffset < -30) {
+          safe = true; // jumped over!
+        } else if (obs.type === 'barrier-high' && player.isSliding) {
+          safe = true; // slid under!
+        }
+
+        if (!safe) {
+          gameActive = false;
+          playSound('hit');
+          showGameOver(score, '💥 Crashed!', `You ran <strong>${Math.floor(distance/5)}m</strong> and collected <strong>${coinsCount}</strong> coins!`);
+          return;
+        }
+      }
+
+      if (obs.z < 0) {
+        obstacles.splice(i, 1);
+      }
+    }
+
+    // Move coins towards camera
+    for (let i = coins.length - 1; i >= 0; i--) {
+      const c = coins[i];
+      c.z -= gameSpeed * 1.8;
+
+      if (!c.collected && c.z <= 110 && c.z >= 50 && c.lane === player.lane && player.yOffset > -40) {
+        c.collected = true;
+        coinsCount++;
+        playSound('coin');
+      }
+
+      if (c.z < 0) {
+        coins.splice(i, 1);
+      }
+    }
+  }
+
+  // Perspective projection helper
+  function project(lane, z) {
+    const depth = Math.max(0.01, z / 1000);
+    const pScale = 1 - depth * 0.85;
+    const groundBottomY = 530;
+    const y = horizonY + (groundBottomY - horizonY) * (1 - depth);
+    const laneXBottom = lanesX[lane];
+    const laneXHorizon = W / 2 + (lane - 1) * (horizonW / 2);
+    const x = laneXHorizon + (laneXBottom - laneXHorizon) * (1 - depth);
+    return { x, y, scale: pScale };
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Night city sky
+    const sky = ctx.createLinearGradient(0, 0, 0, horizonY);
+    sky.addColorStop(0, '#0c1021');
+    sky.addColorStop(1, '#1e2952');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, horizonY);
+
+    // Neon city skyline silhouettes
+    ctx.fillStyle = '#0f1630';
+    for (let i = 0; i < 9; i++) {
+      const bh = 40 + (i * 19) % 55;
+      ctx.fillRect(i * 55, horizonY - bh, 48, bh);
+    }
+
+    // 3D Subway Tracks Ground
+    const ground = ctx.createLinearGradient(0, horizonY, 0, H);
+    ground.addColorStop(0, '#192038');
+    ground.addColorStop(1, '#0e1220');
+    ctx.fillStyle = ground;
+    ctx.fillRect(0, horizonY, W, H - horizonY);
+
+    // Track Rails converging to horizon
+    ctx.strokeStyle = '#34495e';
+    ctx.lineWidth = 3;
+    const railXOffsets = [-60, -20, 20, 60];
+    railXOffsets.forEach(ox => {
+      ctx.beginPath();
+      ctx.moveTo(W / 2 + ox * 0.15, horizonY);
+      ctx.lineTo(W / 2 + ox * 3.6, H);
+      ctx.stroke();
+    });
+
+    // Moving Railroad ties (sleepers)
+    const tieSpacing = 40;
+    const tieOffset = (distance * 2) % tieSpacing;
+    ctx.strokeStyle = '#222f4b';
+    ctx.lineWidth = 4;
+    for (let z = 1000 - tieOffset; z > 0; z -= tieSpacing) {
+      const pL = project(0, z);
+      const pR = project(2, z);
+      ctx.beginPath();
+      ctx.moveTo(pL.x - 30 * pL.scale, pL.y);
+      ctx.lineTo(pR.x + 30 * pR.scale, pR.y);
+      ctx.stroke();
+    }
+
+    // Draw Coins
+    coins.forEach(c => {
+      if (c.collected) return;
+      const p = project(c.lane, c.z);
+      const coinR = 12 * p.scale;
+      ctx.save();
+      ctx.fillStyle = '#f1c40f';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y - 20 * p.scale, coinR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#f39c12';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = '#fff';
+      ctx.font = `bold ${Math.max(8, 12 * p.scale)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('$', p.x, p.y - 16 * p.scale);
+      ctx.restore();
+    });
+
+    // Draw Obstacles (sorted back to front)
+    obstacles.sort((a, b) => b.z - a.z);
+    obstacles.forEach(obs => {
+      const p = project(obs.lane, obs.z);
+      const ow = 75 * p.scale;
+
+      if (obs.type === 'train') {
+        // Red Subway Train Car
+        const th = 110 * p.scale;
+        ctx.fillStyle = '#c0392b';
+        ctx.fillRect(p.x - ow / 2, p.y - th, ow, th);
+        ctx.fillStyle = '#e74c3c';
+        ctx.fillRect(p.x - ow / 2 + 4, p.y - th + 4, ow - 8, th * 0.35); // windows
+        ctx.fillStyle = '#f1c40f';
+        ctx.fillRect(p.x - ow / 2 + 10, p.y - 20 * p.scale, 14 * p.scale, 8 * p.scale); // headlights
+        ctx.fillRect(p.x + ow / 2 - 24, p.y - 20 * p.scale, 14 * p.scale, 8 * p.scale);
+      } else if (obs.type === 'barrier-low') {
+        // Low barricade (Must jump!)
+        const bh = 32 * p.scale;
+        ctx.fillStyle = '#e67e22';
+        ctx.fillRect(p.x - ow / 2, p.y - bh, ow, bh);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(p.x - ow / 2 + 10, p.y - bh + 6, ow - 20, 6 * p.scale);
+      } else if (obs.type === 'barrier-high') {
+        // High street arch / barrier (Must slide under!)
+        const bh = 70 * p.scale;
+        ctx.strokeStyle = '#95a5a6';
+        ctx.lineWidth = 4 * p.scale;
+        ctx.strokeRect(p.x - ow / 2, p.y - bh, ow, bh);
+        ctx.fillStyle = '#e74c3c';
+        ctx.fillRect(p.x - ow / 2, p.y - bh, ow, 18 * p.scale);
+        ctx.fillStyle = '#fff';
+        ctx.font = `bold ${Math.max(7, 10 * p.scale)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText('SLIDE', p.x, p.y - bh + 12 * p.scale);
+      }
+    });
+
+    // Draw Player
+    const playerBaseY = 530;
+    const px = player.currentX;
+    const py = playerBaseY + player.yOffset;
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+    ctx.beginPath();
+    ctx.ellipse(px, playerBaseY, 26, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Skateboard
+    ctx.fillStyle = '#2ecc71';
+    ctx.fillRect(px - 28, py - 4, 56, 8);
+    ctx.fillStyle = '#e74c3c';
+    ctx.beginPath();
+    ctx.arc(px - 18, py + 5, 4, 0, Math.PI * 2);
+    ctx.arc(px + 18, py + 5, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Runner character (normal vs sliding)
+    if (player.isSliding) {
+      // Ducking / sliding posture
+      ctx.fillStyle = '#3498db'; // hoodie
+      ctx.fillRect(px - 20, py - 26, 40, 22);
+      ctx.fillStyle = '#f1c40f'; // cap
+      ctx.beginPath();
+      ctx.arc(px + 4, py - 28, 10, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // Standing / running posture
+      ctx.fillStyle = '#2c3e50'; // pants
+      ctx.fillRect(px - 14, py - 28, 28, 24);
+
+      ctx.fillStyle = '#3498db'; // blue hoodie
+      ctx.fillRect(px - 18, py - 58, 36, 32);
+
+      // Head + Cap
+      ctx.fillStyle = '#f5cd79'; // face
+      ctx.beginPath();
+      ctx.arc(px, py - 68, 13, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = '#e74c3c'; // red cap
+      ctx.beginPath();
+      ctx.arc(px, py - 72, 13, Math.PI, 0);
+      ctx.fill();
+      ctx.fillRect(px, py - 74, 18, 4); // cap visor
+    }
+
+    // HUD
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 22px "Segoe UI", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(`🛹 ${Math.floor(distance / 5)}m`, 20, 40);
+    ctx.fillStyle = '#ffd32a';
+    ctx.fillText(`🪙 ${coinsCount}`, 20, 70);
+
+    if (!started) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+      roundRect(ctx, W / 2 - 160, H / 2 - 30, 320, 70, 14);
+      ctx.fill();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 16px "Segoe UI", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Arrows / WASD to Move & Jump!', W / 2, H / 2 + 2);
+      ctx.font = '13px "Segoe UI", sans-serif';
+      ctx.fillStyle = '#8899aa';
+      ctx.fillText('Down Arrow to Slide under barriers', W / 2, H / 2 + 24);
+    }
+  }
+
+  function loop() {
+    if (!gameActive) return;
+    update();
+    draw();
+    if (gameActive) {
+      gameLoop = requestAnimationFrame(loop);
+    }
+  }
+  loop();
+}
+
+// ============================================================
+//  GAME 4: GARTIC PHONE (Online Multiplayer Drawing & Guessing)
+// ============================================================
+let garticDrawingColor = '#000000';
+let garticBrushSize = 4;
+let isDrawingGartic = false;
+let garticLastX = 0;
+let garticLastY = 0;
+
+function openGarticPhone() {
+  stopActiveGame();
+  currentGame = 'gartic';
+
+  document.getElementById('arcade-menu').classList.add('hidden');
+  document.getElementById('game-area').classList.add('hidden');
+  document.getElementById('gartic-area').classList.remove('hidden');
+
+  socket.emit('gartic-join', { roomId: 'main' }, (res) => {
+    if (res && res.success) {
+      renderGarticView(res.room);
+    }
+  });
+}
+
+document.getElementById('gartic-back-btn').addEventListener('click', () => {
+  socket.emit('gartic-leave', { roomId: 'main' });
+  document.getElementById('gartic-area').classList.add('hidden');
+  document.getElementById('arcade-menu').classList.remove('hidden');
+});
+
+// Setup drawing tools on the canvas
+const garticCanvas = document.getElementById('gartic-draw-canvas');
+const gCtx = garticCanvas.getContext('2d');
+
+function initGarticCanvas() {
+  gCtx.fillStyle = '#ffffff';
+  gCtx.fillRect(0, 0, garticCanvas.width, garticCanvas.height);
+}
+initGarticCanvas();
+
+// Drawing event handlers
+function getGarticCanvasPos(e) {
+  const rect = garticCanvas.getBoundingClientRect();
+  const scaleX = garticCanvas.width / rect.width;
+  const scaleY = garticCanvas.height / rect.height;
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  return {
+    x: (clientX - rect.left) * scaleX,
+    y: (clientY - rect.top) * scaleY,
+  };
+}
+
+garticCanvas.addEventListener('mousedown', (e) => {
+  isDrawingGartic = true;
+  const pos = getGarticCanvasPos(e);
+  garticLastX = pos.x;
+  garticLastY = pos.y;
+});
+
+garticCanvas.addEventListener('mousemove', (e) => {
+  if (!isDrawingGartic) return;
+  const pos = getGarticCanvasPos(e);
+  gCtx.strokeStyle = garticDrawingColor;
+  gCtx.lineWidth = garticBrushSize;
+  gCtx.lineCap = 'round';
+  gCtx.lineJoin = 'round';
+  gCtx.beginPath();
+  gCtx.moveTo(garticLastX, garticLastY);
+  gCtx.lineTo(pos.x, pos.y);
+  gCtx.stroke();
+  garticLastX = pos.x;
+  garticLastY = pos.y;
+});
+
+window.addEventListener('mouseup', () => {
+  isDrawingGartic = false;
+});
+
+// Touch support for drawing on mobile/tablets
+garticCanvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  isDrawingGartic = true;
+  const pos = getGarticCanvasPos(e);
+  garticLastX = pos.x;
+  garticLastY = pos.y;
+}, { passive: false });
+
+garticCanvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (!isDrawingGartic) return;
+  const pos = getGarticCanvasPos(e);
+  gCtx.strokeStyle = garticDrawingColor;
+  gCtx.lineWidth = garticBrushSize;
+  gCtx.lineCap = 'round';
+  gCtx.lineJoin = 'round';
+  gCtx.beginPath();
+  gCtx.moveTo(garticLastX, garticLastY);
+  gCtx.lineTo(pos.x, pos.y);
+  gCtx.stroke();
+  garticLastX = pos.x;
+  garticLastY = pos.y;
+}, { passive: false });
+
+garticCanvas.addEventListener('touchend', () => {
+  isDrawingGartic = false;
+});
+
+// Color Palette clicks
+document.querySelectorAll('#draw-palette .color-dot').forEach(dot => {
+  dot.addEventListener('click', () => {
+    document.querySelectorAll('#draw-palette .color-dot').forEach(d => d.classList.remove('active'));
+    dot.classList.add('active');
+    garticDrawingColor = dot.dataset.color;
+  });
+});
+
+// Brush Size clicks
+document.querySelectorAll('.brush-sizes .size-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.brush-sizes .size-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    garticBrushSize = parseInt(btn.dataset.size, 10);
+  });
+});
+
+document.getElementById('draw-clear-btn').addEventListener('click', initGarticCanvas);
+
+// Start game button
+document.getElementById('gartic-start-btn').addEventListener('click', () => {
+  socket.emit('gartic-start', { roomId: 'main' });
+});
+
+// Submit Prompt
+const promptInput = document.getElementById('gartic-prompt-input');
+promptInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+    e.preventDefault();
+    document.getElementById('gartic-prompt-submit').click();
+  }
+});
+
+document.getElementById('gartic-prompt-submit').addEventListener('click', () => {
+  const text = promptInput.value.trim();
+  if (!text) { alert('Write a funny sentence first!'); return; }
+  socket.emit('gartic-submit', { roomId: 'main', content: text });
+  document.getElementById('gartic-prompt-status').textContent = '✅ Submitted! Waiting for other friends...';
+  document.getElementById('gartic-prompt-submit').disabled = true;
+});
+
+// Submit Drawing
+document.getElementById('gartic-draw-submit').addEventListener('click', () => {
+  const dataUrl = garticCanvas.toDataURL('image/png');
+  socket.emit('gartic-submit', { roomId: 'main', content: dataUrl });
+  document.getElementById('gartic-draw-status').textContent = '✅ Drawing submitted! Waiting for friends...';
+  document.getElementById('gartic-draw-submit').disabled = true;
+});
+
+// Submit Guess
+const guessInput = document.getElementById('gartic-guess-input');
+guessInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+    e.preventDefault();
+    document.getElementById('gartic-guess-submit').click();
+  }
+});
+
+document.getElementById('gartic-guess-submit').addEventListener('click', () => {
+  const text = guessInput.value.trim();
+  if (!text) { alert('Type your guess first!'); return; }
+  socket.emit('gartic-submit', { roomId: 'main', content: text });
+  document.getElementById('gartic-guess-status').textContent = '✅ Guess submitted! Waiting for friends...';
+  document.getElementById('gartic-guess-submit').disabled = true;
+});
+
+// Play Again
+document.getElementById('gartic-album-play-again').addEventListener('click', () => {
+  socket.emit('gartic-reset-lobby', { roomId: 'main' });
+});
+
+// Receive Gartic Phone state updates from server
+socket.on('gartic-state', (state) => {
+  if (currentGame === 'gartic') {
+    renderGarticView(state);
+  }
+});
+
+function renderGarticView(state) {
+  const lobbyView = document.getElementById('gartic-lobby');
+  const promptView = document.getElementById('gartic-prompt-phase');
+  const drawView = document.getElementById('gartic-draw-phase');
+  const guessView = document.getElementById('gartic-guess-phase');
+  const albumView = document.getElementById('gartic-album-phase');
+  const timerBadge = document.getElementById('gartic-timer');
+
+  timerBadge.textContent = `⏱️ ${state.timer}s`;
+
+  // Hide all views first
+  [lobbyView, promptView, drawView, guessView, albumView].forEach(v => v.classList.add('hidden'));
+
+  if (state.status === 'lobby') {
+    lobbyView.classList.remove('hidden');
+    document.getElementById('gartic-player-count').textContent = state.players.length;
+    const pList = document.getElementById('gartic-player-list');
+    pList.innerHTML = '';
+    state.players.forEach(p => {
+      const li = document.createElement('li');
+      li.textContent = `${p}${p === state.host ? ' (Host 👑)' : ''}${p === myUsername ? ' (You)' : ''}`;
+      pList.appendChild(li);
+    });
+
+    const isHost = state.host === myUsername;
+    const startBtn = document.getElementById('gartic-start-btn');
+    const hintText = document.getElementById('gartic-lobby-hint');
+    if (isHost) {
+      startBtn.classList.remove('hidden');
+      startBtn.disabled = state.players.length < 2;
+      hintText.textContent = state.players.length < 2 ? 'Need at least 2 players to start.' : 'Click to start!';
+    } else {
+      startBtn.classList.add('hidden');
+      hintText.textContent = `Waiting for ${state.host} to start the game...`;
+    }
+  } else if (state.status === 'prompt') {
+    promptView.classList.remove('hidden');
+  } else if (state.status === 'draw') {
+    drawView.classList.remove('hidden');
+    const taskText = state.myAssignment && state.myAssignment.itemToProcess ? state.myAssignment.itemToProcess.content : 'Something funny';
+    document.getElementById('gartic-draw-task').textContent = `"${taskText}"`;
+  } else if (state.status === 'guess') {
+    guessView.classList.remove('hidden');
+    const drawingSrc = state.myAssignment && state.myAssignment.itemToProcess ? state.myAssignment.itemToProcess.content : '';
+    document.getElementById('gartic-guess-img').src = drawingSrc;
+  } else if (state.status === 'album') {
+    albumView.classList.remove('hidden');
+    renderGarticAlbum(state.album);
+  }
+}
+
+function renderGarticAlbum(books) {
+  const container = document.getElementById('gartic-album-container');
+  container.innerHTML = '';
+  if (!books) return;
+
+  Object.keys(books).forEach(author => {
+    const chain = books[author];
+    const card = document.createElement('div');
+    card.className = 'album-chain-card';
+
+    let stepsHtml = '';
+    chain.forEach((step, idx) => {
+      if (step.type === 'drawing') {
+        stepsHtml += `
+          <div class="album-step">
+            <div class="album-author">🎨 ${escHtml(step.author)} drew:</div>
+            <img class="album-img" src="${step.content}" alt="Drawing" />
+          </div>
+        `;
+      } else {
+        const label = idx === 0 ? 'Original Prompt' : 'Guessed';
+        stepsHtml += `
+          <div class="album-step">
+            <div class="album-author">💬 ${escHtml(step.author)} (${label}):</div>
+            <div class="album-text">"${escHtml(step.content)}"</div>
+          </div>
+        `;
+      }
+    });
+
+    card.innerHTML = `
+      <div class="album-chain-header">📖 ${escHtml(author)}'s Book</div>
+      ${stepsHtml}
+    `;
+    container.appendChild(card);
+  });
+}
+
+// Utility
+function escHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
 function roundRect(ctx, x, y, width, height, radius) {
   ctx.beginPath();
   ctx.moveTo(x + radius, y);
@@ -1397,13 +2287,4 @@ function roundRect(ctx, x, y, width, height, radius) {
   ctx.lineTo(x, y + radius);
   ctx.quadraticCurveTo(x, y, x + radius, y);
   ctx.closePath();
-}
-
-// ============================================================
-//  UTILITY
-// ============================================================
-function escHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
 }
