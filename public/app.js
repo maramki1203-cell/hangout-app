@@ -235,9 +235,16 @@ function renderGallery(sections) {
   sections.forEach(sec => {
     const div = document.createElement('div');
     div.className = 'section-item' + (sec.id === selectedSectionId ? ' selected' : '');
+    const canManage = (myUsername === 'bang');
     div.innerHTML = `
       <span class="sec-name">${escHtml(sec.name)}</span>
-      <span class="sec-count">${sec.photos.length}</span>
+      <div class="sidebar-item-actions">
+        <span class="sec-count">${sec.photos.length}</span>
+        ${canManage ? `
+          <button class="sidebar-action-btn" title="Rename section" onclick="event.stopPropagation(); renameGallerySectionById(${sec.id}, '${escHtml(sec.name)}')">✏️</button>
+          <button class="sidebar-action-btn delete-btn" title="Delete section" onclick="event.stopPropagation(); deleteGallerySectionById(${sec.id}, '${escHtml(sec.name)}')">🗑️</button>
+        ` : ''}
+      </div>
     `;
     div.addEventListener('click', () => {
       selectedSectionId = sec.id;
@@ -251,12 +258,16 @@ function renderGallery(sections) {
   const nameEl = document.getElementById('gallery-current-section-name');
   const metaEl = document.getElementById('gallery-section-meta');
   const uploadBtn = document.getElementById('upload-photo-btn');
+  const renameSecBtn = document.getElementById('rename-section-btn');
+  const deleteSecBtn = document.getElementById('delete-section-btn');
   const grid = document.getElementById('gallery-photos-grid');
 
   if (!currentSec) {
     nameEl.textContent = 'Select a section';
     metaEl.textContent = 'Choose a folder on the left';
     uploadBtn.classList.add('hidden');
+    if (renameSecBtn) renameSecBtn.classList.add('hidden');
+    if (deleteSecBtn) deleteSecBtn.classList.add('hidden');
     grid.innerHTML = '<div class="placeholder">Select a section on the left to see pictures!</div>';
     return;
   }
@@ -264,6 +275,14 @@ function renderGallery(sections) {
   nameEl.textContent = currentSec.name;
   metaEl.textContent = `Created by ${currentSec.createdBy} · ${currentSec.photos.length} photos`;
   uploadBtn.classList.remove('hidden');
+
+  if (myUsername === 'bang') {
+    if (renameSecBtn) renameSecBtn.classList.remove('hidden');
+    if (deleteSecBtn) deleteSecBtn.classList.remove('hidden');
+  } else {
+    if (renameSecBtn) renameSecBtn.classList.add('hidden');
+    if (deleteSecBtn) deleteSecBtn.classList.add('hidden');
+  }
 
   grid.innerHTML = '';
   if (currentSec.photos.length === 0) {
@@ -350,12 +369,77 @@ window.deleteGalleryPhoto = function(sectionId, photoId) {
   }
 };
 
+// Rename gallery section (Bang only)
+const renameSecBtn = document.getElementById('rename-section-btn');
+if (renameSecBtn) {
+  renameSecBtn.addEventListener('click', () => {
+    if (myUsername !== 'bang') return;
+    const currentSec = galleryData.find(s => s.id === selectedSectionId);
+    if (!currentSec) return;
+    renameGallerySectionById(currentSec.id, currentSec.name);
+  });
+}
+
+window.renameGallerySectionById = function(secId, oldName) {
+  if (myUsername !== 'bang') {
+    alert('Only bang can rename gallery sections!');
+    return;
+  }
+  const newName = prompt('Enter new name for this gallery section:', oldName);
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed) {
+    alert('Section name cannot be empty.');
+    return;
+  }
+
+  socket.emit('rename-gallery-section', { sectionId: secId, newName: trimmed }, (res) => {
+    if (res && res.success) {
+      loadGallery();
+    } else {
+      alert((res && res.message) || 'Error renaming section.');
+    }
+  });
+};
+
+// Delete gallery section (Bang only)
+const deleteSecBtn = document.getElementById('delete-section-btn');
+if (deleteSecBtn) {
+  deleteSecBtn.addEventListener('click', () => {
+    if (myUsername !== 'bang') return;
+    const currentSec = galleryData.find(s => s.id === selectedSectionId);
+    if (!currentSec) return;
+    deleteGallerySectionById(currentSec.id, currentSec.name);
+  });
+}
+
+window.deleteGallerySectionById = function(secId, secName) {
+  if (myUsername !== 'bang') {
+    alert('Only bang can delete sections!');
+    return;
+  }
+  if (confirm(`Are you sure you want to delete section "${secName}" and all of its photos?`)) {
+    socket.emit('delete-gallery-section', { sectionId: secId }, (res) => {
+      if (res && res.success) {
+        if (selectedSectionId === secId) selectedSectionId = null;
+        loadGallery();
+      } else {
+        alert((res && res.message) || 'Error deleting section.');
+      }
+    });
+  }
+};
+
 // ============================================================
 //  CHAT — Rooms & Messages with Photo Upload
 // ============================================================
 function loadRooms() {
   socket.emit('get-rooms', (rooms) => {
     renderRoomList(rooms);
+    // If no room is currently selected and we have rooms, automatically open the first room!
+    if (!currentRoomId && rooms && rooms.length > 0) {
+      openRoom(rooms[0].id, rooms[0].name, rooms[0].members);
+    }
   });
 }
 
@@ -373,11 +457,93 @@ function renderRoomList(rooms) {
         lastMsg = `${r.lastMessage.sender}: ${r.lastMessage.text}`;
       }
     }
-    div.innerHTML = `<div class="room-name">${escHtml(r.name)}</div><div class="room-last-msg">${escHtml(lastMsg)}</div>`;
+    div.innerHTML = `
+      <div class="room-item-content">
+        <div class="room-name">${escHtml(r.name)}</div>
+        <div class="room-last-msg">${escHtml(lastMsg)}</div>
+      </div>
+      <div class="sidebar-item-actions">
+        <button class="sidebar-action-btn" title="Rename room" onclick="event.stopPropagation(); renameChatRoomById(${r.id}, '${escHtml(r.name)}')">✏️</button>
+        <button class="sidebar-action-btn delete-btn" title="Delete room" onclick="event.stopPropagation(); deleteChatRoomById(${r.id}, '${escHtml(r.name)}')">🗑️</button>
+      </div>
+    `;
     div.addEventListener('click', () => openRoom(r.id, r.name, r.members));
     list.appendChild(div);
   });
 }
+
+// Rename & Delete Chat Room Event Handlers
+const renameRoomBtn = document.getElementById('rename-room-btn');
+if (renameRoomBtn) {
+  renameRoomBtn.addEventListener('click', () => {
+    if (!currentRoomId) return;
+    const currentName = document.getElementById('chat-room-name').textContent;
+    renameChatRoomById(currentRoomId, currentName);
+  });
+}
+
+const deleteRoomBtn = document.getElementById('delete-room-btn');
+if (deleteRoomBtn) {
+  deleteRoomBtn.addEventListener('click', () => {
+    if (!currentRoomId) return;
+    const currentName = document.getElementById('chat-room-name').textContent;
+    deleteChatRoomById(currentRoomId, currentName);
+  });
+}
+
+window.renameChatRoomById = function(roomId, oldName) {
+  const newName = prompt('Enter new chat room name:', oldName);
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed) {
+    alert('Room name cannot be empty.');
+    return;
+  }
+
+  socket.emit('rename-room', { roomId, newName: trimmed }, (res) => {
+    if (res && res.success) {
+      if (currentRoomId === roomId) {
+        document.getElementById('chat-room-name').textContent = trimmed;
+      }
+      loadRooms();
+    } else {
+      alert((res && res.message) || 'Error renaming room.');
+    }
+  });
+};
+
+window.deleteChatRoomById = function(roomId, roomName) {
+  if (confirm(`Are you sure you want to delete chat room "${roomName}" and its message history?`)) {
+    socket.emit('delete-room', { roomId }, (res) => {
+      if (res && res.success) {
+        if (currentRoomId === roomId) {
+          currentRoomId = null;
+          document.getElementById('chat-active').classList.add('hidden');
+          document.getElementById('chat-placeholder').classList.remove('hidden');
+        }
+        loadRooms();
+      } else {
+        alert((res && res.message) || 'Error deleting room.');
+      }
+    });
+  }
+};
+
+socket.on('room-renamed', ({ roomId, newName }) => {
+  if (currentRoomId === roomId) {
+    document.getElementById('chat-room-name').textContent = newName;
+  }
+  loadRooms();
+});
+
+socket.on('room-deleted', ({ roomId }) => {
+  if (currentRoomId === roomId) {
+    currentRoomId = null;
+    document.getElementById('chat-active').classList.add('hidden');
+    document.getElementById('chat-placeholder').classList.remove('hidden');
+  }
+  loadRooms();
+});
 
 function openRoom(roomId, name, members) {
   currentRoomId = roomId;
@@ -664,11 +830,81 @@ document.getElementById('modal-call-start').addEventListener('click', () => {
   startCall(participants);
 });
 
-socket.on('incoming-call', ({ callId, caller }) => {
-  const accept = confirm(`📞 Incoming call from ${caller}! Join?`);
-  if (accept) {
-    joinCall(callId);
+let incomingCallTimer = null;
+let incomingCallRingtone = null;
+
+function playRingtone() {
+  try {
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    function beep() {
+      const now = ac.currentTime;
+      const o1 = ac.createOscillator();
+      const o2 = ac.createOscillator();
+      const g = ac.createGain();
+      o1.type = 'sine';
+      o2.type = 'sine';
+      o1.frequency.setValueAtTime(853, now);
+      o2.frequency.setValueAtTime(960, now);
+      g.gain.setValueAtTime(0.12, now);
+      g.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+      o1.connect(g);
+      o2.connect(g);
+      g.connect(ac.destination);
+      o1.start(now);
+      o2.start(now);
+      o1.stop(now + 0.4);
+      o2.stop(now + 0.4);
+    }
+    beep();
+    incomingCallRingtone = setInterval(beep, 2500);
+  } catch (e) {}
+}
+
+function stopRingtone() {
+  if (incomingCallRingtone) {
+    clearInterval(incomingCallRingtone);
+    incomingCallRingtone = null;
   }
+}
+
+socket.on('incoming-call', ({ callId, caller }) => {
+  stopRingtone();
+  playRingtone();
+
+  const modal = document.getElementById('incoming-call-modal');
+  const callerNameEl = document.getElementById('incoming-caller-name');
+  if (callerNameEl) callerNameEl.textContent = caller;
+  if (modal) modal.classList.remove('hidden');
+
+  const joinBtn = document.getElementById('incoming-call-join-btn');
+  const declineBtn = document.getElementById('incoming-call-decline-btn');
+
+  function cleanupCallModal() {
+    stopRingtone();
+    if (modal) modal.classList.add('hidden');
+    if (incomingCallTimer) {
+      clearTimeout(incomingCallTimer);
+      incomingCallTimer = null;
+    }
+  }
+
+  if (joinBtn) {
+    joinBtn.onclick = () => {
+      cleanupCallModal();
+      joinCall(callId);
+    };
+  }
+
+  if (declineBtn) {
+    declineBtn.onclick = () => {
+      cleanupCallModal();
+    };
+  }
+
+  if (incomingCallTimer) clearTimeout(incomingCallTimer);
+  incomingCallTimer = setTimeout(() => {
+    cleanupCallModal();
+  }, 35000);
 });
 
 socket.on('call-ended-auto', ({ message }) => {
@@ -1058,33 +1294,51 @@ document.getElementById('restart-game-top-btn').addEventListener('click', () => 
 
 // Game Over Popup with Ranking Update
 function showGameOver(score, customTitle = 'Game Over', customMsg = null) {
-  document.getElementById('game-over-title').textContent = customTitle;
-  document.getElementById('final-score').textContent = score;
-  if (customMsg) {
-    document.getElementById('game-over-msg').innerHTML = customMsg;
-  } else {
-    document.getElementById('game-over-msg').innerHTML = `Final Score: <span id="final-score">${score}</span>`;
+  const titleEl = document.getElementById('game-over-title');
+  if (titleEl) titleEl.textContent = customTitle;
+
+  const msgEl = document.getElementById('game-over-msg');
+  if (msgEl) {
+    if (customMsg) {
+      msgEl.innerHTML = customMsg;
+    } else {
+      msgEl.innerHTML = `Final Score: <strong style="color:#4e8cff;font-size:1.4rem;">${score}</strong>`;
+    }
   }
 
+  const finalScoreEl = document.getElementById('final-score');
+  if (finalScoreEl) finalScoreEl.textContent = score;
+
   const rankBox = document.getElementById('game-over-rank');
-  rankBox.classList.add('hidden');
+  if (rankBox) rankBox.classList.add('hidden');
 
   // Submit to leaderboard immediately so BOTH buttons ("One More Round" & "Back to Arcade") save the ranking!
-  if (currentGame) {
+  // Only submit if score > 0 (score <= 0 is not eligible for leaderboard)
+  if (currentGame && typeof score === 'number' && score > 0) {
     socket.emit('submit-score', { game: currentGame, score }, (res) => {
-      if (res && res.success) {
+      if (res && res.success && rankBox) {
         if (res.rank && res.rank <= 5) {
           rankBox.innerHTML = `🏆 <strong>New High Score!</strong> You're Rank #${res.rank}!`;
           rankBox.classList.remove('hidden');
         } else if (res.topScore) {
-          rankBox.innerHTML = `Top 1 Score: <strong>${res.topScore}</strong>`;
+          rankBox.innerHTML = `Your Score: <strong>${score}</strong> · Top 1: <strong>${res.topScore}</strong>`;
           rankBox.classList.remove('hidden');
         }
+        // Switch leaderboard tab to this game and reload scores
+        currentLbTab = currentGame;
+        document.querySelectorAll('.lb-tab').forEach(t => {
+          t.classList.toggle('active', t.getAttribute('data-game') === currentGame);
+        });
+        loadLeaderboards();
       }
     });
+  } else if (rankBox) {
+    rankBox.innerHTML = `<span style="color:#8899aa;font-size:13px;">Score: 0 — Not ranked. Keep playing to get on the leaderboard!</span>`;
+    rankBox.classList.remove('hidden');
   }
 
-  document.getElementById('game-over-overlay').classList.remove('hidden');
+  const overlay = document.getElementById('game-over-overlay');
+  if (overlay) overlay.classList.remove('hidden');
 }
 
 // ============================================================
@@ -1529,7 +1783,8 @@ function startFlappyGame() {
       gameLoop = null;
     }
     playSound('hit');
-    showGameOver(score);
+    const msg = score === 1 ? 'You passed <strong>1</strong> pipe!' : `You passed <strong>${score}</strong> pipes!`;
+    showGameOver(score, '💥 Crashed!', msg);
   }
 
   function update() {
@@ -1915,6 +2170,10 @@ function startSubwayRunnerGame() {
 
         if (!safe) {
           gameActive = false;
+          if (gameLoop) {
+            cancelAnimationFrame(gameLoop);
+            gameLoop = null;
+          }
           playSound('hit');
           showGameOver(score, '💥 Crashed!', `You ran <strong>${Math.floor(distance/5)}m</strong> and collected <strong>${coinsCount}</strong> coins!`);
           return;
@@ -2353,6 +2612,57 @@ document.getElementById('gartic-album-share-chat').addEventListener('click', () 
     alert(`✅ Gartic Phone Album successfully shared to "${targetRoom.name}"!`);
   });
 });
+
+// Save Gartic Phone Album to Gallery
+const garticSaveGalleryBtn = document.getElementById('gartic-album-save-gallery');
+if (garticSaveGalleryBtn) {
+  garticSaveGalleryBtn.addEventListener('click', () => {
+    if (!currentGarticBooks) {
+      alert('No album data found to save.');
+      return;
+    }
+
+    socket.emit('get-gallery', (sections) => {
+      if (!sections || sections.length === 0) {
+        alert('No gallery sections exist yet! Ask bang to create a section first.');
+        return;
+      }
+
+      let secOptions = sections.map((s, idx) => `${idx + 1}. ${s.name}`).join('\n');
+      let pick = prompt(`Select a Gallery section to save the drawings to:\n${secOptions}\n(Enter section number 1-${sections.length}):`, '1');
+      if (!pick) return;
+
+      let idx = parseInt(pick, 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= sections.length) {
+        alert('Invalid section selection.');
+        return;
+      }
+
+      const targetSec = sections[idx];
+      let uploadCount = 0;
+
+      Object.keys(currentGarticBooks).forEach(author => {
+        const chain = currentGarticBooks[author];
+        chain.forEach((step) => {
+          if (step.type === 'drawing' && step.content) {
+            uploadCount++;
+            socket.emit('upload-gallery-photo', {
+              sectionId: targetSec.id,
+              image: step.content,
+              caption: `🎨 ${step.author}'s drawing from ${author}'s story`
+            });
+          }
+        });
+      });
+
+      if (uploadCount > 0) {
+        alert(`🖼️ Saved ${uploadCount} drawings to Gallery section "${targetSec.name}"!`);
+      } else {
+        alert('No drawings found in this album to save.');
+      }
+    });
+  });
+}
 
 socket.on('gartic-state', (state) => {
   if (currentGame === 'gartic') {

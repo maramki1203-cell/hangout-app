@@ -292,6 +292,28 @@ io.on('connection', (socket) => {
     if (callback) callback({ success: true });
   });
 
+  // Only "bang" can rename sections!
+  socket.on('rename-gallery-section', ({ sectionId, newName }, callback) => {
+    if (currentUser !== 'bang') {
+      if (callback) callback({ success: false, message: 'Only bang can rename sections!' });
+      return;
+    }
+    const cleanName = (newName || '').trim();
+    if (!cleanName) {
+      if (callback) callback({ success: false, message: 'Section name cannot be empty.' });
+      return;
+    }
+    const sec = gallerySections.find(s => s.id === sectionId);
+    if (!sec) {
+      if (callback) callback({ success: false, message: 'Section not found.' });
+      return;
+    }
+    sec.name = cleanName;
+    savePersistentData();
+    io.emit('gallery-updated', gallerySections);
+    if (callback) callback({ success: true, section: sec });
+  });
+
   // Anyone logged in can upload photos into existing sections!
   socket.on('upload-gallery-photo', ({ sectionId, image, caption }, callback) => {
     if (!currentUser || !image) {
@@ -373,6 +395,55 @@ io.on('connection', (socket) => {
       }
     });
     callback({ success: true, roomId: room.id });
+  });
+
+  // ---------- Chat: rename room ----------
+  socket.on('rename-room', ({ roomId, newName }, callback) => {
+    if (!currentUser) return;
+    const cleanName = (newName || '').trim();
+    if (!cleanName) {
+      if (callback) callback({ success: false, message: 'Room name cannot be empty.' });
+      return;
+    }
+    const room = chatRooms.find(r => r.id === roomId);
+    if (!room || (!room.members.includes(currentUser) && currentUser !== 'bang')) {
+      if (callback) callback({ success: false, message: 'Unauthorized or room not found.' });
+      return;
+    }
+    room.name = cleanName;
+    savePersistentData();
+
+    room.members.forEach(m => {
+      if (onlineUsers[m]) {
+        io.to(onlineUsers[m]).emit('room-renamed', { roomId: room.id, newName: room.name });
+      }
+    });
+    if (callback) callback({ success: true, room: { id: room.id, name: room.name } });
+  });
+
+  // ---------- Chat: delete room ----------
+  socket.on('delete-room', ({ roomId }, callback) => {
+    if (!currentUser) return;
+    const roomIndex = chatRooms.findIndex(r => r.id === roomId);
+    if (roomIndex === -1) {
+      if (callback) callback({ success: false, message: 'Room not found.' });
+      return;
+    }
+    const room = chatRooms[roomIndex];
+    if (!room.members.includes(currentUser) && currentUser !== 'bang') {
+      if (callback) callback({ success: false, message: 'Unauthorized to delete this room.' });
+      return;
+    }
+    const members = [...room.members];
+    chatRooms.splice(roomIndex, 1);
+    savePersistentData();
+
+    members.forEach(m => {
+      if (onlineUsers[m]) {
+        io.to(onlineUsers[m]).emit('room-deleted', { roomId });
+      }
+    });
+    if (callback) callback({ success: true });
   });
 
   // ---------- Chat: get messages ----------

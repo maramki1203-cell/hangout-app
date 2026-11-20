@@ -70,9 +70,15 @@
           <div id="chat-placeholder" class="placeholder">Select a chat to start messaging</div>
           <div id="chat-active" class="hidden">
             <div id="chat-header">
-              <span id="chat-room-name"></span>
-              <span id="chat-room-members" class="members-label"></span>
-              <button id="chat-call-btn" title="Start a call with everyone in this chat">📹 Call</button>
+              <div class="chat-header-info">
+                <span id="chat-room-name"></span>
+                <span id="chat-room-members" class="members-label"></span>
+              </div>
+              <div class="chat-header-actions">
+                <button id="chat-call-btn" title="Start a call with everyone in this chat">📹 Call</button>
+                <button id="rename-room-btn" class="secondary-btn small-btn" title="Rename this chat room">✏️ Rename Room</button>
+                <button id="delete-room-btn" class="secondary-btn danger-btn small-btn" title="Delete this chat room">🗑️ Delete Room</button>
+              </div>
             </div>
             <div id="messages-area"></div>
             <div id="message-bar">
@@ -108,6 +114,8 @@
             <div class="gallery-actions">
               <input type="file" id="gallery-file-input" accept="image/*" class="hidden" />
               <button id="upload-photo-btn" class="primary-btn hidden">📷 Upload Photo</button>
+              <button id="rename-section-btn" class="secondary-btn hidden" title="Rename section (Bang only)">✏️ Rename Section</button>
+              <button id="delete-section-btn" class="secondary-btn danger-btn hidden" title="Delete section (Bang only)">🗑️ Delete Section</button>
             </div>
           </div>
           <div id="gallery-photos-grid" class="photos-grid">
@@ -290,6 +298,7 @@
           <div class="album-controls" style="display:flex; gap:14px; flex-wrap:wrap; justify-content:center;">
             <button id="gartic-album-play-again" class="primary-btn big-btn">🔄 Play Again</button>
             <button id="gartic-album-share-chat" class="secondary-btn big-btn" style="border-color:#4e8cff; color:#fff;">📤 Share Album to Chat</button>
+            <button id="gartic-album-save-gallery" class="primary-btn big-btn" style="background:#2ecc71;">🖼️ Save to Gallery</button>
           </div>
         </div>
       </div>
@@ -357,6 +366,19 @@
       <div class="modal-actions">
         <button id="modal-section-cancel" class="secondary-btn">Cancel</button>
         <button id="modal-section-create" class="primary-btn">Create Section</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================== INCOMING CALL NOTIFICATION POPUP ==================== -->
+  <div id="incoming-call-modal" class="incoming-call-card hidden">
+    <div class="incoming-call-bell">📞</div>
+    <div class="incoming-call-text">
+      <div class="incoming-call-title">Incoming Video Call!</div>
+      <div class="incoming-call-msg"><strong id="incoming-caller-name">User</strong> has invited you into a call.</div>
+      <div class="incoming-call-actions">
+        <button id="incoming-call-join-btn" class="join-call-btn">📞 Join</button>
+        <button id="incoming-call-decline-btn" class="decline-call-btn">✕ Decline</button>
       </div>
     </div>
   </div>
