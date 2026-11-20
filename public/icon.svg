@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1e3c72" />
+      <stop offset="100%" stop-color="#2a5298" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="100" fill="url(#bg)" />
+  <!-- House -->
+  <path d="M256 80 L100 210 L140 210 L140 400 L372 400 L372 210 L412 210 Z" fill="#ffffff" opacity="0.95" />
+  <!-- Door / Center Accent -->
+  <rect x="216" y="270" width="80" height="130" rx="12" fill="#4e8cff" />
+  <!-- Controller icon inside door -->
+  <circle cx="240" cy="310" r="10" fill="#ffd32a" />
+  <circle cx="272" cy="310" r="10" fill="#2ecc71" />
+  <!-- Chimney -->
+  <path d="M330 140 L370 140 L370 200 L330 166 Z" fill="#ffd32a" />
+</svg>

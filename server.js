@@ -28,6 +28,9 @@ const USERS = {
   '시로': 'pw1234',
   '미티': 'pw1234',
   '즤':   'pw1234',
+  '진아': 'pw1234',
+  '빡':   'pw1234',
+  '루비': 'pw1234',
 };
 
 // ============================================================
@@ -40,7 +43,7 @@ let chatRooms = [
   {
     id: 1,
     name: 'General Hangout 💬',
-    members: ['bang', '시로', '미티', '즤'],
+    members: ['bang', '시로', '미티', '즤', '진아', '빡', '루비'],
     messages: [],
     createdAt: Date.now(),
     lastActivity: Date.now()
@@ -78,7 +81,15 @@ function loadPersistentData() {
     if (fs.existsSync(DATA_FILE)) {
       const raw = fs.readFileSync(DATA_FILE, 'utf8');
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed.chatRooms)) chatRooms = parsed.chatRooms;
+      if (Array.isArray(parsed.chatRooms)) {
+        chatRooms = parsed.chatRooms;
+        const genRoom = chatRooms.find(r => r.id === 1);
+        if (genRoom) {
+          Object.keys(USERS).forEach(u => {
+            if (!genRoom.members.includes(u)) genRoom.members.push(u);
+          });
+        }
+      }
       if (Array.isArray(parsed.callHistory)) callHistory = parsed.callHistory;
       if (parsed.leaderboards && typeof parsed.leaderboards === 'object') leaderboards = parsed.leaderboards;
       if (Array.isArray(parsed.gallerySections)) gallerySections = parsed.gallerySections;

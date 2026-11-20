@@ -2,8 +2,15 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#16213e" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Hangout" />
   <title>Hangout</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+  <link rel="apple-touch-icon" href="icon.svg" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -70,6 +77,7 @@
           <div id="chat-placeholder" class="placeholder">Select a chat to start messaging</div>
           <div id="chat-active" class="hidden">
             <div id="chat-header">
+              <button id="mobile-chat-back-btn" class="mobile-back-btn" title="Back to chats">‹ Chats</button>
               <div class="chat-header-info">
                 <span id="chat-room-name"></span>
                 <span id="chat-room-members" class="members-label"></span>
@@ -107,6 +115,7 @@
         <!-- Right: Photos in selected section -->
         <div class="gallery-main">
           <div class="gallery-main-header">
+            <button id="mobile-gallery-back-btn" class="mobile-back-btn" title="Back to folders">‹ Folders</button>
             <div>
               <h2 id="gallery-current-section-name">Select a section</h2>
               <span id="gallery-section-meta" class="subtle-meta">Choose a folder on the left</span>
@@ -201,6 +210,15 @@
           <span id="game-score-display">Score: 0</span>
         </div>
         <canvas id="game-canvas" width="840" height="520"></canvas>
+        <!-- Mobile touch controls for Subway Runner -->
+        <div id="runner-mobile-controls" class="hidden">
+          <button id="ctrl-left" class="ctrl-btn" type="button">◀ Left</button>
+          <div class="ctrl-col">
+            <button id="ctrl-up" class="ctrl-btn jump-btn" type="button">▲ Jump</button>
+            <button id="ctrl-down" class="ctrl-btn slide-btn" type="button">▼ Slide</button>
+          </div>
+          <button id="ctrl-right" class="ctrl-btn" type="button">Right ▶</button>
+        </div>
         <div id="game-over-overlay" class="hidden">
           <div class="game-over-box">
             <h2 id="game-over-title">Game Over</h2>

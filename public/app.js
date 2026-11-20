@@ -248,6 +248,7 @@ function renderGallery(sections) {
     `;
     div.addEventListener('click', () => {
       selectedSectionId = sec.id;
+      document.getElementById('gallery-section').classList.add('in-section');
       renderGallery(galleryData);
     });
     listContainer.appendChild(div);
@@ -308,6 +309,14 @@ function renderGallery(sections) {
       </div>
     `;
     grid.appendChild(card);
+  });
+}
+
+// Mobile gallery back button
+const mobileGalleryBackBtn = document.getElementById('mobile-gallery-back-btn');
+if (mobileGalleryBackBtn) {
+  mobileGalleryBackBtn.addEventListener('click', () => {
+    document.getElementById('gallery-section').classList.remove('in-section');
   });
 }
 
@@ -547,6 +556,7 @@ socket.on('room-deleted', ({ roomId }) => {
 
 function openRoom(roomId, name, members) {
   currentRoomId = roomId;
+  document.getElementById('chat-section').classList.add('in-room');
   document.getElementById('chat-placeholder').classList.add('hidden');
   document.getElementById('chat-active').classList.remove('hidden');
   document.getElementById('chat-room-name').textContent = name;
@@ -562,6 +572,14 @@ function openRoom(roomId, name, members) {
     area.innerHTML = '';
     msgs.forEach(m => appendMessage(m));
     area.scrollTop = area.scrollHeight;
+  });
+}
+
+// Mobile chat back button
+const mobileChatBackBtn = document.getElementById('mobile-chat-back-btn');
+if (mobileChatBackBtn) {
+  mobileChatBackBtn.addEventListener('click', () => {
+    document.getElementById('chat-section').classList.remove('in-room');
   });
 }
 
@@ -1235,6 +1253,8 @@ function stopActiveGame() {
     activeGameCleanup();
     activeGameCleanup = null;
   }
+  const mobileControls = document.getElementById('runner-mobile-controls');
+  if (mobileControls) mobileControls.classList.add('hidden');
 }
 
 document.querySelectorAll('.play-btn').forEach(btn => {
@@ -2096,10 +2116,25 @@ function startSubwayRunnerGame() {
   canvas.addEventListener('touchstart', onTouchStart, { passive: true });
   canvas.addEventListener('touchend', onTouchEnd, { passive: true });
 
+  const mobileControls = document.getElementById('runner-mobile-controls');
+  if (mobileControls) {
+    mobileControls.classList.remove('hidden');
+    const onCtrl = (fn) => (e) => { e.preventDefault(); fn(); };
+    document.getElementById('ctrl-left').ontouchstart = onCtrl(moveLeft);
+    document.getElementById('ctrl-left').onmousedown = onCtrl(moveLeft);
+    document.getElementById('ctrl-right').ontouchstart = onCtrl(moveRight);
+    document.getElementById('ctrl-right').onmousedown = onCtrl(moveRight);
+    document.getElementById('ctrl-up').ontouchstart = onCtrl(jump);
+    document.getElementById('ctrl-up').onmousedown = onCtrl(jump);
+    document.getElementById('ctrl-down').ontouchstart = onCtrl(slide);
+    document.getElementById('ctrl-down').onmousedown = onCtrl(slide);
+  }
+
   activeGameCleanup = () => {
     window.removeEventListener('keydown', onKeyDown);
     canvas.removeEventListener('touchstart', onTouchStart);
     canvas.removeEventListener('touchend', onTouchEnd);
+    if (mobileControls) mobileControls.classList.add('hidden');
   };
 
   function spawnWorldObjects() {
