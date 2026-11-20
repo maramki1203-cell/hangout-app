@@ -30,7 +30,7 @@ let currentGarticBooks = null;
 let lastGarticRound = -1;
 let lastGarticStatus = '';
 
-// ---- Robust WebRTC ICE Servers (STUN + OpenRelay TURN for remote NAT traversal) ----
+// ---- Fast & Reliable WebRTC STUN Servers for Remote NAT Traversal ----
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -39,24 +39,10 @@ const ICE_SERVERS = {
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
-    // Free open relay TURN servers for NAT traversal behind symmetric NAT / firewalls
-    {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    }
+    { urls: 'stun:stun.services.mozilla.com' },
+    { urls: 'stun:global.stun.twilio.com:3478' }
   ],
-  iceCandidatePoolSize: 10
+  iceCandidatePoolSize: 6
 };
 
 // ============================================================
@@ -81,6 +67,9 @@ function doLogin() {
   socket.emit('login', { username, password }, (res) => {
     if (res.success) {
       myUsername = res.username;
+      localStorage.setItem('hangout_user', username);
+      localStorage.setItem('hangout_pass', password);
+
       loginScreen.classList.add('hidden');
       appScreen.classList.remove('hidden');
       document.getElementById('user-label').textContent = `Logged in as ${myUsername}`;
@@ -106,7 +95,28 @@ function doLogin() {
 }
 
 document.getElementById('logout-btn').addEventListener('click', () => {
+  localStorage.removeItem('hangout_user');
+  localStorage.removeItem('hangout_pass');
   location.reload();
+});
+
+// Auto-login & Auto-reconnect
+socket.on('connect', () => {
+  const savedUser = localStorage.getItem('hangout_user');
+  const savedPass = localStorage.getItem('hangout_pass');
+  if (savedUser && savedPass) {
+    if (!myUsername) {
+      loginUser.value = savedUser;
+      loginPass.value = savedPass;
+      doLogin();
+    } else {
+      socket.emit('login', { username: savedUser, password: savedPass }, () => {
+        if (currentCallId) {
+          socket.emit('rejoin-call', { callId: currentCallId });
+        }
+      });
+    }
+  }
 });
 
 // ============================================================
@@ -991,14 +1001,18 @@ function createPeerConnection(peerUsername, isInitiator) {
 
   const pc = new RTCPeerConnection(ICE_SERVERS);
   peerConnections[peerUsername] = pc;
-  iceCandidateQueue[peerUsername] = [];
+  if (!iceCandidateQueue[peerUsername]) {
+    iceCandidateQueue[peerUsername] = [];
+  }
 
+  // Add all local audio & video tracks to the connection
   if (localStream) {
     localStream.getTracks().forEach(track => {
       pc.addTrack(track, localStream);
     });
   }
 
+  // Handle incoming remote media tracks (Audio & Video)
   pc.ontrack = (event) => {
     let videoBox = document.getElementById('video-' + peerUsername);
     if (!videoBox) {
@@ -1006,18 +1020,53 @@ function createPeerConnection(peerUsername, isInitiator) {
       videoBox.className = 'video-box';
       videoBox.id = 'video-' + peerUsername;
       videoBox.innerHTML = `
-        <video autoplay playsinline></video>
+        <video autoplay playsinline webkit-playsinline></video>
         <span class="video-label">${escHtml(peerUsername)}</span>
+        <button class="unmute-overlay-btn hidden" type="button">🔊 Tap to Unmute</button>
       `;
       document.getElementById('videos-grid').appendChild(videoBox);
+
+      const unmuteBtn = videoBox.querySelector('.unmute-overlay-btn');
+      unmuteBtn.onclick = (e) => {
+        e.stopPropagation();
+        const v = videoBox.querySelector('video');
+        if (v) {
+          v.muted = false;
+          v.play().then(() => unmuteBtn.classList.add('hidden')).catch(err => console.warn(err));
+        }
+      };
     }
+
     const remoteVideo = videoBox.querySelector('video');
-    remoteVideo.srcObject = event.streams[0];
+    remoteVideo.setAttribute('autoplay', '');
+    remoteVideo.setAttribute('playsinline', '');
+    remoteVideo.setAttribute('webkit-playsinline', '');
+
+    if (event.streams && event.streams[0]) {
+      remoteVideo.srcObject = event.streams[0];
+    } else {
+      let inboundStream = remoteVideo.srcObject;
+      if (!inboundStream) {
+        inboundStream = new MediaStream();
+        remoteVideo.srcObject = inboundStream;
+      }
+      inboundStream.addTrack(event.track);
+    }
+
+    // Attempt unmuted playback; fallback to muted if mobile browser requires a user tap
     remoteVideo.muted = false;
-    remoteVideo.play().catch(e => console.warn('Autoplay prevented:', e));
-    document.getElementById('call-status').textContent = `In Call`;
+    remoteVideo.play().catch(() => {
+      console.warn('Unmuted autoplay prevented by browser. Playing muted until tapped.');
+      remoteVideo.muted = true;
+      remoteVideo.play().catch(e => console.error('Muted play error:', e));
+      const unmuteBtn = videoBox.querySelector('.unmute-overlay-btn');
+      if (unmuteBtn) unmuteBtn.classList.remove('hidden');
+    });
+
+    document.getElementById('call-status').textContent = `In Call (${Object.keys(peerConnections).length + 1} users)`;
   };
 
+  // Send ICE candidates to the remote peer
   pc.onicecandidate = (event) => {
     if (event.candidate) {
       socket.emit('webrtc-ice-candidate', {
@@ -1028,37 +1077,74 @@ function createPeerConnection(peerUsername, isInitiator) {
     }
   };
 
+  // Connection health monitoring
   pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-      removePeer(peerUsername);
+    console.log(`Connection state with ${peerUsername}:`, pc.connectionState);
+    if (pc.connectionState === 'connected') {
+      document.getElementById('call-status').textContent = `In Call (${Object.keys(peerConnections).length + 1} users)`;
+    } else if (pc.connectionState === 'failed') {
+      console.warn(`Connection failed with ${peerUsername}, attempting ICE restart...`);
+      if (typeof pc.restartIce === 'function') {
+        pc.restartIce();
+      }
     }
   };
 
+  pc.oniceconnectionstatechange = () => {
+    console.log(`ICE state with ${peerUsername}:`, pc.iceConnectionState);
+    if (pc.iceConnectionState === 'failed' && typeof pc.restartIce === 'function') {
+      pc.restartIce();
+    }
+  };
+
+  // If we are the designated initiator, create and send the offer
   if (isInitiator) {
     pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
-      .then(offer => pc.setLocalDescription(offer))
+      .then(offer => {
+        if (pc.signalingState !== 'stable') return;
+        return pc.setLocalDescription(offer);
+      })
       .then(() => {
-        socket.emit('webrtc-offer', {
-          callId: currentCallId,
-          to: peerUsername,
-          offer: pc.localDescription,
-        });
+        if (pc.localDescription) {
+          socket.emit('webrtc-offer', {
+            callId: currentCallId,
+            to: peerUsername,
+            offer: pc.localDescription,
+          });
+        }
       })
       .catch(err => console.error('Error creating offer:', err));
   }
 }
 
+// Receive offer from peer
 socket.on('webrtc-offer', async ({ callId, from, offer }) => {
   createPeerConnection(from, false);
   const pc = peerConnections[from];
+  if (!pc) return;
+
   try {
-    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    if (pc.signalingState !== 'stable') {
+      await Promise.all([
+        pc.setLocalDescription({ type: 'rollback' }),
+        pc.setRemoteDescription(new RTCSessionDescription(offer))
+      ]);
+    } else {
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    }
+
+    // Flush any ICE candidates that arrived before the remote description was set
     if (iceCandidateQueue[from] && iceCandidateQueue[from].length > 0) {
       for (const cand of iceCandidateQueue[from]) {
-        await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => console.warn(e));
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(cand));
+        } catch (e) {
+          console.warn('Candidate flush warning:', e);
+        }
       }
       iceCandidateQueue[from] = [];
     }
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
     socket.emit('webrtc-answer', { callId, to: from, answer: pc.localDescription });
@@ -1067,14 +1153,20 @@ socket.on('webrtc-offer', async ({ callId, from, offer }) => {
   }
 });
 
+// Receive answer from peer
 socket.on('webrtc-answer', async ({ from, answer }) => {
   const pc = peerConnections[from];
-  if (pc) {
+  if (pc && pc.signalingState === 'have-local-offer') {
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
       if (iceCandidateQueue[from] && iceCandidateQueue[from].length > 0) {
         for (const cand of iceCandidateQueue[from]) {
-          await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => console.warn(e));
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(cand));
+          } catch (e) {
+            console.warn('Candidate flush warning:', e);
+          }
         }
         iceCandidateQueue[from] = [];
       }
@@ -1084,6 +1176,7 @@ socket.on('webrtc-answer', async ({ from, answer }) => {
   }
 });
 
+// Receive ICE candidate from peer
 socket.on('webrtc-ice-candidate', async ({ from, candidate }) => {
   const pc = peerConnections[from];
   if (pc && pc.remoteDescription && pc.remoteDescription.type) {
@@ -1098,17 +1191,33 @@ socket.on('webrtc-ice-candidate', async ({ from, candidate }) => {
   }
 });
 
+// When a new peer joins the call, existing peers initiate the connection
 socket.on('peer-joined', ({ callId, username }) => {
   if (callId === currentCallId) {
     createPeerConnection(username, true);
   }
 });
 
+// When a peer leaves the call
 socket.on('peer-left', ({ callId, username }) => {
   if (callId === currentCallId) {
     removePeer(username);
   }
 });
+
+// Tap anywhere on the call screen to ensure all audio tracks are unmuted and playing
+const callOverlay = document.getElementById('call-overlay');
+if (callOverlay) {
+  callOverlay.addEventListener('click', () => {
+    document.querySelectorAll('#videos-grid video').forEach(v => {
+      if (v.id !== 'local-video') {
+        v.muted = false;
+        v.play().catch(() => {});
+      }
+    });
+    document.querySelectorAll('.unmute-overlay-btn').forEach(b => b.classList.add('hidden'));
+  });
+}
 
 function removePeer(username) {
   if (peerConnections[username]) {

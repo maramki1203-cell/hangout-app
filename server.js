@@ -549,6 +549,19 @@ io.on('connection', (socket) => {
     callback({ success: true, peers: existingPeers });
   });
 
+  // ---------- Calls: rejoin on reconnection ----------
+  socket.on('rejoin-call', ({ callId }) => {
+    if (!currentUser) return;
+    const call = activeCalls[callId];
+    if (call && call.peers.includes(currentUser)) {
+      call.peers.forEach(p => {
+        if (p !== currentUser && onlineUsers[p]) {
+          io.to(onlineUsers[p]).emit('peer-joined', { callId, username: currentUser });
+        }
+      });
+    }
+  });
+
   // ---------- Calls: leave ----------
   socket.on('leave-call', ({ callId }) => {
     if (!currentUser) return;
