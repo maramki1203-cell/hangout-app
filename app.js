@@ -948,19 +948,71 @@ socket.on('call-ended-auto', ({ message }) => {
   endCall();
 });
 
-async function startCall(participants) {
+async function acquireLocalMedia() {
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  } catch (err) {
-    alert('Could not access camera/microphone. Please allow camera & microphone permissions.');
-    return;
+    return await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user' },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+  } catch (e1) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch (e2) {
+      alert('Could not access camera/microphone. Please allow camera & microphone permissions.');
+      return null;
+    }
   }
+}
 
-  unmuteAllRemoteAudios();
+function unlockAudioSystem() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      if (!window._hangoutAudioCtx) {
+        window._hangoutAudioCtx = new AudioCtx();
+      }
+      if (window._hangoutAudioCtx.state === 'suspended') {
+        window._hangoutAudioCtx.resume().catch(() => {});
+      }
+      // Play brief inaudible tone to unlock device audio hardware
+      const osc = window._hangoutAudioCtx.createOscillator();
+      const gain = window._hangoutAudioCtx.createGain();
+      gain.gain.value = 0.001;
+      osc.connect(gain);
+      gain.connect(window._hangoutAudioCtx.destination);
+      osc.start(0);
+      osc.stop(window._hangoutAudioCtx.currentTime + 0.03);
+    }
+    if (navigator.audioSession) {
+      navigator.audioSession.type = 'play-and-record';
+    }
+  } catch (e) {
+    console.warn('Audio unlock warning:', e);
+  }
+}
+
+function unmuteAllRemoteVideos() {
+  unlockAudioSystem();
+  document.querySelectorAll('#videos-grid .video-box:not(#local-video-box) video').forEach(v => {
+    v.muted = false;
+    v.volume = 1.0;
+    v.play().catch(e => console.warn('Unmute play error:', e));
+  });
+  document.querySelectorAll('.unmute-overlay-btn').forEach(b => b.classList.add('hidden'));
+}
+
+async function startCall(participants) {
+  localStream = await acquireLocalMedia();
+  if (!localStream) return;
+
+  unlockAudioSystem();
+
+  localStream.getAudioTracks().forEach(t => t.enabled = true);
+  localStream.getVideoTracks().forEach(t => t.enabled = true);
 
   const localVideo = document.getElementById('local-video');
   localVideo.srcObject = localStream;
-  localVideo.muted = true;
+  localVideo.muted = true; // Local video must be muted to prevent microphone feedback echo
   localVideo.play().catch(e => console.warn(e));
 
   document.getElementById('call-overlay').classList.remove('hidden');
@@ -981,19 +1033,18 @@ async function startCall(participants) {
 }
 
 async function joinCall(callId) {
-  try {
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  } catch (err) {
-    alert('Could not access camera/microphone. Please check browser permissions.');
-    return;
-  }
+  localStream = await acquireLocalMedia();
+  if (!localStream) return;
 
-  unmuteAllRemoteAudios();
+  unlockAudioSystem();
   currentCallId = callId;
+
+  localStream.getAudioTracks().forEach(t => t.enabled = true);
+  localStream.getVideoTracks().forEach(t => t.enabled = true);
 
   const localVideo = document.getElementById('local-video');
   localVideo.srcObject = localStream;
-  localVideo.muted = true;
+  localVideo.muted = true; // Local video must be muted to prevent microphone feedback echo
   localVideo.play().catch(e => console.warn(e));
 
   document.getElementById('call-overlay').classList.remove('hidden');
@@ -1017,31 +1068,11 @@ async function joinCall(callId) {
   });
 }
 
-function unmuteAllRemoteAudios() {
-  try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (AudioCtx) {
-      if (!window._hangoutAudioCtx) {
-        window._hangoutAudioCtx = new AudioCtx();
-      }
-      if (window._hangoutAudioCtx.state === 'suspended') {
-        window._hangoutAudioCtx.resume().catch(() => {});
-      }
-    }
-  } catch (e) {}
-
-  document.querySelectorAll('#videos-grid audio').forEach(a => {
-    a.muted = false;
-    a.play().catch(() => {});
-  });
-  document.querySelectorAll('.unmute-overlay-btn').forEach(b => b.classList.add('hidden'));
-}
-
 function createPeerConnection(peerUsername, isInitiator) {
   peerUsername = (peerUsername || '').trim().normalize('NFC');
   if (!peerUsername || peerUsername === myUsername) return;
 
-  // Immediately ensure a video/audio box exists in the DOM for this peer with live status
+  // Immediately ensure a video box exists in the DOM for this peer with live status & sound controls
   let videoBox = document.getElementById('video-' + peerUsername);
   if (!videoBox) {
     videoBox = document.createElement('div');
@@ -1054,19 +1085,20 @@ function createPeerConnection(peerUsername, isInitiator) {
         <div class="peer-avatar-name">${escHtml(peerUsername)}</div>
         <div class="peer-avatar-hint">Connecting... ⏳</div>
       </div>
-      <video autoplay playsinline webkit-playsinline muted style="display:none;"></video>
-      <audio autoplay playsinline></audio>
+      <video autoplay playsinline webkit-playsinline></video>
       <span class="video-label">${escHtml(peerUsername)}</span>
       <span class="peer-status-badge connecting" id="status-badge-${peerUsername}">Connecting...</span>
-      <button class="unmute-overlay-btn hidden" type="button">🔊 Tap to Hear Audio</button>
+      <button class="unmute-overlay-btn hidden" type="button">🔊 Tap to Turn On Sound</button>
     `;
     document.getElementById('videos-grid').appendChild(videoBox);
 
     const unmuteBtn = videoBox.querySelector('.unmute-overlay-btn');
-    unmuteBtn.onclick = (e) => {
-      e.stopPropagation();
-      unmuteAllRemoteAudios();
-    };
+    if (unmuteBtn) {
+      unmuteBtn.onclick = (e) => {
+        e.stopPropagation();
+        unmuteAllRemoteVideos();
+      };
+    }
   }
 
   if (peerConnections[peerUsername]) return;
@@ -1080,37 +1112,56 @@ function createPeerConnection(peerUsername, isInitiator) {
   // Add all local audio & video tracks to the connection
   if (localStream) {
     localStream.getTracks().forEach(track => {
+      track.enabled = true;
       pc.addTrack(track, localStream);
     });
   }
 
-  // Handle incoming remote media tracks (Audio & Video separated for 100% mobile reliability)
+  // Handle incoming remote media tracks (Audio & Video together via HTML5 <video>)
   pc.ontrack = (event) => {
     const box = document.getElementById('video-' + peerUsername);
     if (!box) return;
     const remoteVideo = box.querySelector('video');
-    const remoteAudio = box.querySelector('audio');
     const placeholder = box.querySelector('.peer-avatar-placeholder');
     const badge = box.querySelector('.peer-status-badge');
+    const unmuteBtn = box.querySelector('.unmute-overlay-btn');
 
-    if (event.track.kind === 'video') {
-      const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
-      if (remoteVideo.srcObject !== stream) {
-        remoteVideo.srcObject = stream;
-      }
-      remoteVideo.muted = true; // Video element is muted so iOS/Android autoplay NEVER blocks
-      remoteVideo.style.display = 'block';
-      if (placeholder) placeholder.style.display = 'none';
-      remoteVideo.play().catch(e => console.warn('Remote video play warning:', e));
-    } else if (event.track.kind === 'audio') {
-      const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
-      if (remoteAudio.srcObject !== stream) {
-        remoteAudio.srcObject = stream;
-      }
-      remoteAudio.muted = false;
-      remoteAudio.play().catch(() => {
-        console.warn('Remote audio unmuted play prevented by browser policy. Showing unmute button.');
-        const unmuteBtn = box.querySelector('.unmute-overlay-btn');
+    const stream = (event.streams && event.streams[0])
+      ? event.streams[0]
+      : (remoteVideo.srcObject || new MediaStream());
+
+    if (!event.streams || !event.streams[0]) {
+      stream.addTrack(event.track);
+    }
+
+    if (remoteVideo.srcObject !== stream) {
+      remoteVideo.srcObject = stream;
+    }
+
+    remoteVideo.setAttribute('playsinline', '');
+    remoteVideo.setAttribute('webkit-playsinline', '');
+    remoteVideo.style.display = 'block';
+    if (placeholder) placeholder.style.display = 'none';
+
+    // Ensure audio track is enabled
+    if (event.track.kind === 'audio') {
+      event.track.enabled = true;
+    }
+
+    // Attempt unmuted play first
+    remoteVideo.muted = false;
+    remoteVideo.volume = 1.0;
+
+    const playPromise = remoteVideo.play();
+    if (playPromise !== undefined) {
+      playPromise.then(() => {
+        console.log(`Video & Audio playing unmuted for ${peerUsername}`);
+        if (unmuteBtn) unmuteBtn.classList.add('hidden');
+      }).catch((err) => {
+        console.warn(`Unmuted play blocked by browser for ${peerUsername}:`, err);
+        // Play muted so video renders, but display unmute button so user can tap
+        remoteVideo.muted = true;
+        remoteVideo.play().catch(e => console.warn(e));
         if (unmuteBtn) unmuteBtn.classList.remove('hidden');
       });
     }
@@ -1314,7 +1365,10 @@ socket.on('peer-left', ({ callId, username }) => {
 const callOverlay = document.getElementById('call-overlay');
 if (callOverlay) {
   callOverlay.addEventListener('click', () => {
-    unmuteAllRemoteAudios();
+    unmuteAllRemoteVideos();
+  });
+  callOverlay.addEventListener('touchend', () => {
+    unmuteAllRemoteVideos();
   });
 }
 
