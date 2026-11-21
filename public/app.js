@@ -30,7 +30,7 @@ let currentGarticBooks = null;
 let lastGarticRound = -1;
 let lastGarticStatus = '';
 
-// ---- Fast & Reliable WebRTC STUN Servers for Remote NAT Traversal ----
+// ---- WebRTC ICE Servers (STUN for Direct P2P + TURN for Symmetric NAT / Cellular Relays) ----
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -39,10 +39,18 @@ const ICE_SERVERS = {
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
-    { urls: 'stun:stun.services.mozilla.com' },
-    { urls: 'stun:global.stun.twilio.com:3478' }
+    { urls: 'stun:openrelay.metered.ca:80' },
+    {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp'
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    }
   ],
-  iceCandidatePoolSize: 6
+  iceCandidatePoolSize: 10
 };
 
 // ============================================================
@@ -60,14 +68,14 @@ loginPass.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); }
 loginUser.addEventListener('keydown', e => { if (e.key === 'Enter') loginPass.focus(); });
 
 function doLogin() {
-  const username = loginUser.value.trim().toLowerCase();
+  const username = loginUser.value.trim().normalize('NFC').toLowerCase();
   const password = loginPass.value;
   if (!username || !password) { loginError.textContent = 'Please fill in both fields.'; return; }
 
   socket.emit('login', { username, password }, (res) => {
     if (res.success) {
-      myUsername = res.username;
-      localStorage.setItem('hangout_user', username);
+      myUsername = res.username.normalize('NFC');
+      localStorage.setItem('hangout_user', myUsername);
       localStorage.setItem('hangout_pass', password);
 
       loginScreen.classList.add('hidden');
@@ -861,9 +869,11 @@ document.getElementById('modal-call-start').addEventListener('click', () => {
 let incomingCallTimer = null;
 let incomingCallRingtone = null;
 
+let ringtoneCtx = null;
 function playRingtone() {
   try {
     const ac = new (window.AudioContext || window.webkitAudioContext)();
+    ringtoneCtx = ac;
     function beep() {
       const now = ac.currentTime;
       const o1 = ac.createOscillator();
@@ -892,6 +902,12 @@ function stopRingtone() {
   if (incomingCallRingtone) {
     clearInterval(incomingCallRingtone);
     incomingCallRingtone = null;
+  }
+  // Fully close the ringtone audio engine — a lingering AudioContext can
+  // silence the microphone / call audio on iPhones and some Androids.
+  if (ringtoneCtx) {
+    try { ringtoneCtx.close(); } catch (e) {}
+    ringtoneCtx = null;
   }
 }
 
@@ -940,54 +956,114 @@ socket.on('call-ended-auto', ({ message }) => {
   endCall();
 });
 
-async function startCall(participants) {
+async function acquireLocalMedia() {
   try {
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  } catch (err) {
-    alert('Could not access camera/microphone. Please allow camera & microphone permissions.');
-    return;
+    return await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user' },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+  } catch (e1) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch (e2) {
+      alert('Could not access camera/microphone. Please allow camera & microphone permissions.');
+      return null;
+    }
   }
+}
+
+function unlockAudioSystem() {
+  // Intentionally NO AudioContext here: a running Web Audio context during a
+  // call can mute the mic / call audio on iOS Safari. Just make sure the ringtone is gone.
+  stopRingtone();
+}
+
+// Play every remote <audio> element. Must run inside a tap/click to satisfy autoplay rules.
+function unmuteAllRemoteVideos() {
+  unlockAudioSystem();
+  document.querySelectorAll('.remote-audio').forEach(a => {
+    a.muted = false;
+    a.volume = 1.0;
+    a.play().then(() => {
+      const box = document.getElementById('video-' + a.dataset.peer);
+      const btn = box && box.querySelector('.unmute-overlay-btn');
+      if (btn) btn.classList.add('hidden');
+    }).catch(e => console.warn('Unmute play error:', e));
+  });
+  // Videos stay muted (their sound comes from the <audio> element) but make sure they play
+  document.querySelectorAll('#videos-grid .video-box:not(#local-video-box) video').forEach(v => {
+    v.play().catch(() => {});
+  });
+  document.querySelectorAll('.unmute-overlay-btn').forEach(b => b.classList.add('hidden'));
+}
+
+async function startCall(participants) {
+  localStream = await acquireLocalMedia();
+  if (!localStream) return;
+
+  unlockAudioSystem();
+
+  localStream.getAudioTracks().forEach(t => t.enabled = true);
+  localStream.getVideoTracks().forEach(t => t.enabled = true);
 
   const localVideo = document.getElementById('local-video');
   localVideo.srcObject = localStream;
-  localVideo.muted = true;
+  localVideo.muted = true; // Local video must be muted to prevent microphone feedback echo
   localVideo.play().catch(e => console.warn(e));
 
   document.getElementById('call-overlay').classList.remove('hidden');
+  document.querySelectorAll('#videos-grid .video-box:not(#local-video-box)').forEach(el => el.remove());
   micEnabled = true;
   camEnabled = true;
+  document.getElementById('toggle-mic').classList.remove('muted');
+  document.getElementById('toggle-mic').textContent = '🎤';
+  document.getElementById('toggle-cam').classList.remove('muted');
+  document.getElementById('toggle-cam').textContent = '📷';
 
-  socket.emit('start-call', { participants }, (res) => {
+  const normParticipants = (Array.isArray(participants) ? participants : [])
+    .map(p => typeof p === 'string' ? p.trim().normalize('NFC') : '')
+    .filter(Boolean);
+
+  socket.emit('start-call', { participants: normParticipants }, (res) => {
     if (res.success) {
       currentCallId = res.callId;
-      document.getElementById('call-status').textContent = `In Call — waiting for others...`;
+      document.getElementById('call-status').textContent = `In Call — waiting for others to join...`;
     }
   });
 }
 
 async function joinCall(callId) {
-  try {
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-  } catch (err) {
-    alert('Could not access camera/microphone. Please check browser permissions.');
-    return;
-  }
+  localStream = await acquireLocalMedia();
+  if (!localStream) return;
 
+  unlockAudioSystem();
   currentCallId = callId;
+
+  localStream.getAudioTracks().forEach(t => t.enabled = true);
+  localStream.getVideoTracks().forEach(t => t.enabled = true);
+
   const localVideo = document.getElementById('local-video');
   localVideo.srcObject = localStream;
-  localVideo.muted = true;
+  localVideo.muted = true; // Local video must be muted to prevent microphone feedback echo
   localVideo.play().catch(e => console.warn(e));
 
   document.getElementById('call-overlay').classList.remove('hidden');
+  document.querySelectorAll('#videos-grid .video-box:not(#local-video-box)').forEach(el => el.remove());
   micEnabled = true;
   camEnabled = true;
+  document.getElementById('toggle-mic').classList.remove('muted');
+  document.getElementById('toggle-mic').textContent = '🎤';
+  document.getElementById('toggle-cam').classList.remove('muted');
+  document.getElementById('toggle-cam').textContent = '📷';
 
   socket.emit('join-call', { callId }, (res) => {
     if (res.success) {
       document.getElementById('call-status').textContent = `In Call`;
-      res.peers.forEach(peer => {
-        createPeerConnection(peer, false);
+      (res.peers || []).forEach(peer => {
+        const normPeer = (peer || '').trim().normalize('NFC');
+        if (normPeer && normPeer !== myUsername) {
+          createPeerConnection(normPeer, false);
+        }
       });
     } else {
       alert(res.message || 'Could not join call.');
@@ -996,7 +1072,90 @@ async function joinCall(callId) {
   });
 }
 
+// ---- Live sound diagnostics (per friend box) ----
+// Shows: is MY mic sending sound to them? is THEIR sound arriving? is it actually playing?
+const audioDiagTimers = {};
+function startAudioDiagnostics(peerUsername, pc) {
+  if (audioDiagTimers[peerUsername]) clearInterval(audioDiagTimers[peerUsername]);
+  let lastSent = 0, lastRecv = 0;
+  audioDiagTimers[peerUsername] = setInterval(async () => {
+    const el = document.getElementById('audio-diag-' + peerUsername);
+    if (!el || pc.connectionState === 'closed') {
+      clearInterval(audioDiagTimers[peerUsername]);
+      delete audioDiagTimers[peerUsername];
+      return;
+    }
+    try {
+      const stats = await pc.getStats();
+      let sent = 0, recv = 0, micLvl = null, inLvl = null;
+      stats.forEach(r => {
+        const kind = r.kind || r.mediaType;
+        if (r.type === 'outbound-rtp' && kind === 'audio') sent += r.bytesSent || 0;
+        if (r.type === 'inbound-rtp' && kind === 'audio') {
+          recv += r.bytesReceived || 0;
+          if (typeof r.audioLevel === 'number') inLvl = r.audioLevel;
+        }
+        if (r.type === 'media-source' && kind === 'audio' && typeof r.audioLevel === 'number') micLvl = r.audioLevel;
+      });
+      const sending = sent > lastSent;
+      const receiving = recv > lastRecv;
+      lastSent = sent; lastRecv = recv;
+
+      const box = document.getElementById('video-' + peerUsername);
+      const audioEl = box && box.querySelector('audio');
+      const playing = audioEl && audioEl.srcObject && !audioEl.paused && !audioEl.muted;
+      const pct = v => (v === null ? '' : ` ${Math.round(v * 100)}%`);
+      const micOn = localStream && localStream.getAudioTracks().some(t => t.enabled && t.readyState === 'live');
+
+      el.textContent =
+        `🎤 me→${peerUsername}: ${!micOn ? 'MIC OFF ❌' : (sending ? '✅' : '❌')}${pct(micLvl)}  ·  ` +
+        `🔈 ${peerUsername}→me: ${receiving ? '✅' : '❌'}${pct(inLvl)}  ·  ` +
+        `${playing ? '▶️ playing' : '⏸ not playing'}`;
+
+      // Sound is arriving but the browser blocked playback -> show the tap button
+      if (receiving && !playing) {
+        const btn = box && box.querySelector('.unmute-overlay-btn');
+        if (btn) btn.classList.remove('hidden');
+      }
+    } catch (e) { /* ignore */ }
+  }, 1500);
+}
+
 function createPeerConnection(peerUsername, isInitiator) {
+  peerUsername = (peerUsername || '').trim().normalize('NFC');
+  if (!peerUsername || peerUsername === myUsername) return;
+
+  // Immediately ensure a video box exists in the DOM for this peer with live status & sound controls
+  let videoBox = document.getElementById('video-' + peerUsername);
+  if (!videoBox) {
+    videoBox = document.createElement('div');
+    videoBox.className = 'video-box';
+    videoBox.id = 'video-' + peerUsername;
+    const initial = peerUsername.charAt(0).toUpperCase();
+    videoBox.innerHTML = `
+      <div class="peer-avatar-placeholder" id="placeholder-${peerUsername}">
+        <div class="peer-avatar-circle">${escHtml(initial)}</div>
+        <div class="peer-avatar-name">${escHtml(peerUsername)}</div>
+        <div class="peer-avatar-hint">Connecting... ⏳</div>
+      </div>
+      <video autoplay playsinline webkit-playsinline muted></video>
+      <audio class="remote-audio" data-peer="${escHtml(peerUsername)}" autoplay playsinline></audio>
+      <span class="video-label">${escHtml(peerUsername)}</span>
+      <span class="peer-status-badge connecting" id="status-badge-${peerUsername}">Connecting...</span>
+      <span class="audio-diag" id="audio-diag-${peerUsername}">🔈 waiting for sound…</span>
+      <button class="unmute-overlay-btn hidden" type="button">🔊 Tap to Turn On Sound</button>
+    `;
+    document.getElementById('videos-grid').appendChild(videoBox);
+
+    const unmuteBtn = videoBox.querySelector('.unmute-overlay-btn');
+    if (unmuteBtn) {
+      unmuteBtn.onclick = (e) => {
+        e.stopPropagation();
+        unmuteAllRemoteVideos();
+      };
+    }
+  }
+
   if (peerConnections[peerUsername]) return;
 
   const pc = new RTCPeerConnection(ICE_SERVERS);
@@ -1008,92 +1167,120 @@ function createPeerConnection(peerUsername, isInitiator) {
   // Add all local audio & video tracks to the connection
   if (localStream) {
     localStream.getTracks().forEach(track => {
+      track.enabled = (track.kind === 'audio') ? micEnabled : camEnabled;
       pc.addTrack(track, localStream);
     });
   }
 
-  // Handle incoming remote media tracks (Audio & Video)
+  // Video -> muted <video> (always allowed to autoplay). Audio -> dedicated <audio>.
   pc.ontrack = (event) => {
-    let videoBox = document.getElementById('video-' + peerUsername);
-    if (!videoBox) {
-      videoBox = document.createElement('div');
-      videoBox.className = 'video-box';
-      videoBox.id = 'video-' + peerUsername;
-      videoBox.innerHTML = `
-        <video autoplay playsinline webkit-playsinline></video>
-        <span class="video-label">${escHtml(peerUsername)}</span>
-        <button class="unmute-overlay-btn hidden" type="button">🔊 Tap to Unmute</button>
-      `;
-      document.getElementById('videos-grid').appendChild(videoBox);
+    const box = document.getElementById('video-' + peerUsername);
+    if (!box) return;
+    const remoteVideo = box.querySelector('video');
+    const remoteAudio = box.querySelector('audio');
+    const placeholder = box.querySelector('.peer-avatar-placeholder');
+    const badge = box.querySelector('.peer-status-badge');
+    const unmuteBtn = box.querySelector('.unmute-overlay-btn');
 
-      const unmuteBtn = videoBox.querySelector('.unmute-overlay-btn');
-      unmuteBtn.onclick = (e) => {
-        e.stopPropagation();
-        const v = videoBox.querySelector('video');
-        if (v) {
-          v.muted = false;
-          v.play().then(() => unmuteBtn.classList.add('hidden')).catch(err => console.warn(err));
-        }
-      };
-    }
-
-    const remoteVideo = videoBox.querySelector('video');
-    remoteVideo.setAttribute('autoplay', '');
-    remoteVideo.setAttribute('playsinline', '');
-    remoteVideo.setAttribute('webkit-playsinline', '');
-
-    if (event.streams && event.streams[0]) {
-      remoteVideo.srcObject = event.streams[0];
-    } else {
-      let inboundStream = remoteVideo.srcObject;
-      if (!inboundStream) {
-        inboundStream = new MediaStream();
-        remoteVideo.srcObject = inboundStream;
-      }
-      inboundStream.addTrack(event.track);
-    }
-
-    // Attempt unmuted playback; fallback to muted if mobile browser requires a user tap
-    remoteVideo.muted = false;
-    remoteVideo.play().catch(() => {
-      console.warn('Unmuted autoplay prevented by browser. Playing muted until tapped.');
+    if (event.track.kind === 'video') {
+      remoteVideo.srcObject = new MediaStream([event.track]);
       remoteVideo.muted = true;
-      remoteVideo.play().catch(e => console.error('Muted play error:', e));
-      const unmuteBtn = videoBox.querySelector('.unmute-overlay-btn');
-      if (unmuteBtn) unmuteBtn.classList.remove('hidden');
-    });
+      remoteVideo.style.display = 'block';
+      if (placeholder) placeholder.style.display = 'none';
+      remoteVideo.play().catch(e => console.warn('Remote video play warning:', e));
+    } else if (event.track.kind === 'audio') {
+      event.track.enabled = true;
+      remoteAudio.srcObject = new MediaStream([event.track]);
+      remoteAudio.muted = false;
+      remoteAudio.volume = 1.0;
+      remoteAudio.play().then(() => {
+        if (unmuteBtn) unmuteBtn.classList.add('hidden');
+      }).catch(err => {
+        console.warn(`Audio autoplay blocked for ${peerUsername}:`, err);
+        if (unmuteBtn) unmuteBtn.classList.remove('hidden');
+      });
+    }
 
+    if (badge) {
+      badge.textContent = 'Live 🟢';
+      badge.className = 'peer-status-badge connected';
+    }
     document.getElementById('call-status').textContent = `In Call (${Object.keys(peerConnections).length + 1} users)`;
   };
 
-  // Send ICE candidates to the remote peer
+  startAudioDiagnostics(peerUsername, pc);
+
+  // Send ICE candidates to remote peer with robust serialization
   pc.onicecandidate = (event) => {
-    if (event.candidate) {
+    if (event.candidate && event.candidate.candidate) {
+      const candInit = event.candidate.toJSON
+        ? event.candidate.toJSON()
+        : {
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+          };
       socket.emit('webrtc-ice-candidate', {
         callId: currentCallId,
         to: peerUsername,
-        candidate: event.candidate,
+        candidate: candInit,
       });
     }
   };
 
-  // Connection health monitoring
-  pc.onconnectionstatechange = () => {
-    console.log(`Connection state with ${peerUsername}:`, pc.connectionState);
-    if (pc.connectionState === 'connected') {
+  // Connection health monitoring & automatic ICE restart
+  function updatePeerStatus(state) {
+    const badge = document.getElementById('status-badge-' + peerUsername);
+    const box = document.getElementById('video-' + peerUsername);
+    const placeholder = box ? box.querySelector('.peer-avatar-placeholder') : null;
+    const hint = placeholder ? placeholder.querySelector('.peer-avatar-hint') : null;
+
+    if (state === 'connected') {
+      if (badge) {
+        badge.textContent = 'Connected 🟢';
+        badge.className = 'peer-status-badge connected';
+      }
+      if (hint) hint.textContent = 'Connected';
       document.getElementById('call-status').textContent = `In Call (${Object.keys(peerConnections).length + 1} users)`;
-    } else if (pc.connectionState === 'failed') {
-      console.warn(`Connection failed with ${peerUsername}, attempting ICE restart...`);
-      if (typeof pc.restartIce === 'function') {
-        pc.restartIce();
+    } else if (state === 'checking' || state === 'connecting') {
+      if (badge) {
+        badge.textContent = 'Connecting 🔄';
+        badge.className = 'peer-status-badge connecting';
+      }
+      if (hint) hint.textContent = 'Connecting... ⏳';
+    } else if (state === 'failed') {
+      if (badge) {
+        badge.textContent = 'Failed 🔴 (Retrying)';
+        badge.className = 'peer-status-badge failed';
+      }
+      if (hint) hint.textContent = 'Connection failed, retrying...';
+      // Trigger ICE restart if initiator
+      if (isInitiator && typeof pc.createOffer === 'function') {
+        pc.createOffer({ iceRestart: true })
+          .then(offer => pc.setLocalDescription(offer))
+          .then(() => {
+            if (pc.localDescription) {
+              socket.emit('webrtc-offer', {
+                callId: currentCallId,
+                to: peerUsername,
+                offer: { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
+              });
+            }
+          })
+          .catch(e => console.warn('ICE restart offer failed:', e));
+      }
+    } else if (state === 'disconnected') {
+      if (badge) {
+        badge.textContent = 'Reconnecting ⚠️';
+        badge.className = 'peer-status-badge reconnecting';
       }
     }
-  };
+  }
 
+  pc.onconnectionstatechange = () => updatePeerStatus(pc.connectionState);
   pc.oniceconnectionstatechange = () => {
-    console.log(`ICE state with ${peerUsername}:`, pc.iceConnectionState);
-    if (pc.iceConnectionState === 'failed' && typeof pc.restartIce === 'function') {
-      pc.restartIce();
+    if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'connected') {
+      updatePeerStatus(pc.iceConnectionState);
     }
   };
 
@@ -1109,7 +1296,7 @@ function createPeerConnection(peerUsername, isInitiator) {
           socket.emit('webrtc-offer', {
             callId: currentCallId,
             to: peerUsername,
-            offer: pc.localDescription,
+            offer: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
           });
         }
       })
@@ -1119,25 +1306,22 @@ function createPeerConnection(peerUsername, isInitiator) {
 
 // Receive offer from peer
 socket.on('webrtc-offer', async ({ callId, from, offer }) => {
+  from = (from || '').trim().normalize('NFC');
   createPeerConnection(from, false);
   const pc = peerConnections[from];
   if (!pc) return;
 
   try {
-    if (pc.signalingState !== 'stable') {
-      await Promise.all([
-        pc.setLocalDescription({ type: 'rollback' }),
-        pc.setRemoteDescription(new RTCSessionDescription(offer))
-      ]);
-    } else {
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    if (pc.signalingState === 'have-local-offer') {
+      await pc.setLocalDescription({ type: 'rollback' });
     }
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
     // Flush any ICE candidates that arrived before the remote description was set
     if (iceCandidateQueue[from] && iceCandidateQueue[from].length > 0) {
       for (const cand of iceCandidateQueue[from]) {
         try {
-          await pc.addIceCandidate(new RTCIceCandidate(cand));
+          await pc.addIceCandidate(cand);
         } catch (e) {
           console.warn('Candidate flush warning:', e);
         }
@@ -1147,7 +1331,11 @@ socket.on('webrtc-offer', async ({ callId, from, offer }) => {
 
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    socket.emit('webrtc-answer', { callId, to: from, answer: pc.localDescription });
+    socket.emit('webrtc-answer', {
+      callId,
+      to: from,
+      answer: { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
+    });
   } catch (err) {
     console.error('Error handling WebRTC offer:', err);
   }
@@ -1155,6 +1343,7 @@ socket.on('webrtc-offer', async ({ callId, from, offer }) => {
 
 // Receive answer from peer
 socket.on('webrtc-answer', async ({ from, answer }) => {
+  from = (from || '').trim().normalize('NFC');
   const pc = peerConnections[from];
   if (pc && pc.signalingState === 'have-local-offer') {
     try {
@@ -1163,7 +1352,7 @@ socket.on('webrtc-answer', async ({ from, answer }) => {
       if (iceCandidateQueue[from] && iceCandidateQueue[from].length > 0) {
         for (const cand of iceCandidateQueue[from]) {
           try {
-            await pc.addIceCandidate(new RTCIceCandidate(cand));
+            await pc.addIceCandidate(cand);
           } catch (e) {
             console.warn('Candidate flush warning:', e);
           }
@@ -1178,10 +1367,12 @@ socket.on('webrtc-answer', async ({ from, answer }) => {
 
 // Receive ICE candidate from peer
 socket.on('webrtc-ice-candidate', async ({ from, candidate }) => {
+  from = (from || '').trim().normalize('NFC');
+  if (!candidate || !candidate.candidate) return;
   const pc = peerConnections[from];
   if (pc && pc.remoteDescription && pc.remoteDescription.type) {
     try {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      await pc.addIceCandidate(candidate);
     } catch (err) {
       console.warn('Error adding ICE candidate:', err);
     }
@@ -1193,13 +1384,15 @@ socket.on('webrtc-ice-candidate', async ({ from, candidate }) => {
 
 // When a new peer joins the call, existing peers initiate the connection
 socket.on('peer-joined', ({ callId, username }) => {
-  if (callId === currentCallId) {
+  username = (username || '').trim().normalize('NFC');
+  if (callId === currentCallId && username !== myUsername) {
     createPeerConnection(username, true);
   }
 });
 
 // When a peer leaves the call
 socket.on('peer-left', ({ callId, username }) => {
+  username = (username || '').trim().normalize('NFC');
   if (callId === currentCallId) {
     removePeer(username);
   }
@@ -1209,17 +1402,19 @@ socket.on('peer-left', ({ callId, username }) => {
 const callOverlay = document.getElementById('call-overlay');
 if (callOverlay) {
   callOverlay.addEventListener('click', () => {
-    document.querySelectorAll('#videos-grid video').forEach(v => {
-      if (v.id !== 'local-video') {
-        v.muted = false;
-        v.play().catch(() => {});
-      }
-    });
-    document.querySelectorAll('.unmute-overlay-btn').forEach(b => b.classList.add('hidden'));
+    unmuteAllRemoteVideos();
+  });
+  callOverlay.addEventListener('touchend', () => {
+    unmuteAllRemoteVideos();
   });
 }
 
 function removePeer(username) {
+  username = (username || '').trim().normalize('NFC');
+  if (audioDiagTimers[username]) {
+    clearInterval(audioDiagTimers[username]);
+    delete audioDiagTimers[username];
+  }
   if (peerConnections[username]) {
     peerConnections[username].close();
     delete peerConnections[username];

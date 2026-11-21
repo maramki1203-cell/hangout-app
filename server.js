@@ -151,8 +151,11 @@ const garticRooms = {
   }
 };
 
-// Serve static files from "public" folder
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve static files from "public" folder.
+// no-cache = browsers must re-check for updates, so phones never run an outdated app.js
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache'),
+}));
 
 // ============================================================
 //  Helper: Call leave and auto-end when <= 1 peer

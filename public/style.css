@@ -922,6 +922,7 @@ input { font-family: inherit; }
   padding: 20px;
   justify-content: center;
   align-content: center;
+  overflow-y: auto;
 }
 .video-box {
   position: relative;
@@ -929,26 +930,123 @@ input { font-family: inherit; }
   border-radius: 12px;
   overflow: hidden;
   width: 420px;
+  max-width: 100%;
   height: 315px;
   box-shadow: 0 4px 20px rgba(0,0,0,0.5);
   border: 1px solid #30363d;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .video-box video {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+  background: #000;
 }
 .video-label {
   position: absolute;
   bottom: 10px;
   left: 12px;
-  background: rgba(0,0,0,0.7);
+  background: rgba(0,0,0,0.75);
+  backdrop-filter: blur(4px);
   padding: 4px 10px;
   border-radius: 6px;
   font-size: 13px;
   font-weight: 600;
   color: #fff;
+  z-index: 6;
+}
+.peer-status-badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(4px);
+  z-index: 6;
+  transition: background 0.3s;
+}
+.peer-status-badge.connected { background: rgba(35, 134, 54, 0.9); }
+.peer-status-badge.connecting { background: rgba(219, 154, 34, 0.9); }
+.peer-status-badge.failed { background: rgba(218, 54, 51, 0.9); }
+.peer-status-badge.reconnecting { background: rgba(210, 100, 20, 0.9); }
+
+.peer-avatar-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #8b949e;
+  position: absolute;
+  inset: 0;
+  background: #161b22;
+  z-index: 2;
+}
+.peer-avatar-circle {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #2a3a5c, #4e8cff);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 26px;
+  font-weight: 700;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+}
+.peer-avatar-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #c9d1d9;
+}
+.peer-avatar-hint {
+  font-size: 12px;
+  color: #8b949e;
+}
+
+.unmute-overlay-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: #238636;
+  color: #fff;
+  border: 2px solid #3fb950;
+  padding: 12px 20px;
+  border-radius: 24px;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.7);
+  z-index: 10;
+  transition: transform 0.15s, background 0.15s;
+}
+.unmute-overlay-btn:hover {
+  background: #2ea043;
+  transform: translate(-50%, -50%) scale(1.05);
+}
+.remote-audio { display: none; }
+.audio-diag {
+  position: absolute;
+  top: 40px;
+  left: 8px;
+  right: 8px;
+  background: rgba(0,0,0,0.72);
+  color: #e6edf3;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 4px 8px;
+  border-radius: 6px;
+  z-index: 7;
+  pointer-events: none;
 }
 
 /* ---------- Modals ---------- */
@@ -1362,6 +1460,34 @@ input { font-family: inherit; }
   }
 
   /* ---------- Calls on Mobile ---------- */
+  #call-overlay {
+    z-index: 3000 !important;
+  }
+  #call-topbar {
+    padding: 8px 12px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  #call-status {
+    font-size: 13px;
+    width: 100%;
+    margin-bottom: 4px;
+  }
+  .call-ctrl-btn {
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+  #videos-grid {
+    padding: 10px;
+    gap: 10px;
+    align-content: flex-start;
+  }
+  .video-box {
+    width: 100% !important;
+    max-width: 100% !important;
+    height: auto !important;
+    aspect-ratio: 4 / 3;
+  }
   .calls-container {
     flex-direction: column-reverse;
   }
