@@ -200,10 +200,11 @@ io.on('connection', (socket) => {
 
   // ---------- Authentication ----------
   socket.on('login', ({ username, password }, callback) => {
-    if (USERS[username] && USERS[username] === password) {
-      currentUser = username;
-      onlineUsers[username] = socket.id;
-      callback({ success: true, username });
+    const normUser = typeof username === 'string' ? username.trim().normalize('NFC') : '';
+    if (USERS[normUser] && USERS[normUser] === password) {
+      currentUser = normUser;
+      onlineUsers[normUser] = socket.id;
+      callback({ success: true, username: normUser });
 
       io.emit('online-users', Object.keys(onlineUsers));
       io.emit('all-users', Object.keys(USERS));
@@ -504,24 +505,27 @@ io.on('connection', (socket) => {
   // ---------- Calls: start a call ----------
   socket.on('start-call', ({ participants }, callback) => {
     if (!currentUser) return;
-    if (!participants.includes(currentUser)) participants.push(currentUser);
+    const normParticipants = (Array.isArray(participants) ? participants : [])
+      .map(p => typeof p === 'string' ? p.trim().normalize('NFC') : '')
+      .filter(Boolean);
+    if (!normParticipants.includes(currentUser)) normParticipants.push(currentUser);
 
     const callId = 'call-' + (nextCallId++);
     activeCalls[callId] = {
       id: callId,
       caller: currentUser,
-      participants,
+      participants: normParticipants,
       peers: [currentUser],
       startedAt: Date.now(),
     };
 
     // Notify invited participants with custom alert
-    participants.forEach(p => {
+    normParticipants.forEach(p => {
       if (p !== currentUser && onlineUsers[p]) {
         io.to(onlineUsers[p]).emit('incoming-call', {
           callId,
           caller: currentUser,
-          participants,
+          participants: normParticipants,
         });
       }
     });
@@ -570,20 +574,23 @@ io.on('connection', (socket) => {
 
   // ---------- WebRTC Signaling ----------
   socket.on('webrtc-offer', ({ callId, to, offer }) => {
-    if (onlineUsers[to]) {
-      io.to(onlineUsers[to]).emit('webrtc-offer', { callId, from: currentUser, offer });
+    const normTo = typeof to === 'string' ? to.trim().normalize('NFC') : to;
+    if (onlineUsers[normTo]) {
+      io.to(onlineUsers[normTo]).emit('webrtc-offer', { callId, from: currentUser, offer });
     }
   });
 
   socket.on('webrtc-answer', ({ callId, to, answer }) => {
-    if (onlineUsers[to]) {
-      io.to(onlineUsers[to]).emit('webrtc-answer', { callId, from: currentUser, answer });
+    const normTo = typeof to === 'string' ? to.trim().normalize('NFC') : to;
+    if (onlineUsers[normTo]) {
+      io.to(onlineUsers[normTo]).emit('webrtc-answer', { callId, from: currentUser, answer });
     }
   });
 
   socket.on('webrtc-ice-candidate', ({ callId, to, candidate }) => {
-    if (onlineUsers[to]) {
-      io.to(onlineUsers[to]).emit('webrtc-ice-candidate', { callId, from: currentUser, candidate });
+    const normTo = typeof to === 'string' ? to.trim().normalize('NFC') : to;
+    if (onlineUsers[normTo]) {
+      io.to(onlineUsers[normTo]).emit('webrtc-ice-candidate', { callId, from: currentUser, candidate });
     }
   });
 
@@ -766,15 +773,17 @@ io.on('connection', (socket) => {
   // ---------- Disconnect ----------
   socket.on('disconnect', () => {
     if (currentUser) {
-      delete onlineUsers[currentUser];
-      io.emit('online-users', Object.keys(onlineUsers));
+      if (onlineUsers[currentUser] === socket.id) {
+        delete onlineUsers[currentUser];
+        io.emit('online-users', Object.keys(onlineUsers));
 
-      Object.keys(activeCalls).forEach(callId => {
-        const call = activeCalls[callId];
-        if (call.peers.includes(currentUser)) {
-          handlePeerLeaveCall(callId, currentUser);
-        }
-      });
+        Object.keys(activeCalls).forEach(callId => {
+          const call = activeCalls[callId];
+          if (call.peers.includes(currentUser)) {
+            handlePeerLeaveCall(callId, currentUser);
+          }
+        });
+      }
 
       Object.keys(garticRooms).forEach(roomId => {
         const room = garticRooms[roomId];

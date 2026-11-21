@@ -30,7 +30,7 @@ let currentGarticBooks = null;
 let lastGarticRound = -1;
 let lastGarticStatus = '';
 
-// ---- Robust WebRTC ICE Servers (STUN + OpenRelay TURN for remote NAT traversal) ----
+// ---- WebRTC ICE Servers (STUN for Direct P2P + TURN for Symmetric NAT / Cellular Relays) ----
 const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -39,19 +39,13 @@ const ICE_SERVERS = {
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
-    // Free open relay TURN servers for NAT traversal behind symmetric NAT / firewalls
+    { urls: 'stun:openrelay.metered.ca:80' },
     {
-      urls: 'turn:openrelay.metered.ca:80',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443',
-      username: 'openrelayproject',
-      credential: 'openrelayproject'
-    },
-    {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp'
+      ],
       username: 'openrelayproject',
       credential: 'openrelayproject'
     }
@@ -74,13 +68,16 @@ loginPass.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); }
 loginUser.addEventListener('keydown', e => { if (e.key === 'Enter') loginPass.focus(); });
 
 function doLogin() {
-  const username = loginUser.value.trim().toLowerCase();
+  const username = loginUser.value.trim().normalize('NFC').toLowerCase();
   const password = loginPass.value;
   if (!username || !password) { loginError.textContent = 'Please fill in both fields.'; return; }
 
   socket.emit('login', { username, password }, (res) => {
     if (res.success) {
-      myUsername = res.username;
+      myUsername = res.username.normalize('NFC');
+      localStorage.setItem('hangout_user', myUsername);
+      localStorage.setItem('hangout_pass', password);
+
       loginScreen.classList.add('hidden');
       appScreen.classList.remove('hidden');
       document.getElementById('user-label').textContent = `Logged in as ${myUsername}`;
@@ -106,7 +103,28 @@ function doLogin() {
 }
 
 document.getElementById('logout-btn').addEventListener('click', () => {
+  localStorage.removeItem('hangout_user');
+  localStorage.removeItem('hangout_pass');
   location.reload();
+});
+
+// Auto-login & Auto-reconnect
+socket.on('connect', () => {
+  const savedUser = localStorage.getItem('hangout_user');
+  const savedPass = localStorage.getItem('hangout_pass');
+  if (savedUser && savedPass) {
+    if (!myUsername) {
+      loginUser.value = savedUser;
+      loginPass.value = savedPass;
+      doLogin();
+    } else {
+      socket.emit('login', { username: savedUser, password: savedPass }, () => {
+        if (currentCallId) {
+          socket.emit('rejoin-call', { callId: currentCallId });
+        }
+      });
+    }
+  }
 });
 
 // ============================================================
@@ -235,16 +253,20 @@ function renderGallery(sections) {
   sections.forEach(sec => {
     const div = document.createElement('div');
     div.className = 'section-item' + (sec.id === selectedSectionId ? ' selected' : '');
-    const canDel = (myUsername === 'bang');
+    const canManage = (myUsername === 'bang');
     div.innerHTML = `
       <span class="sec-name">${escHtml(sec.name)}</span>
-      <div style="display:flex;align-items:center;gap:6px;">
+      <div class="sidebar-item-actions">
         <span class="sec-count">${sec.photos.length}</span>
-        ${canDel ? `<button class="sec-del-inline-btn" title="Delete section" onclick="event.stopPropagation(); deleteGallerySectionById(${sec.id}, '${escHtml(sec.name)}')">🗑️</button>` : ''}
+        ${canManage ? `
+          <button class="sidebar-action-btn" title="Rename section" onclick="event.stopPropagation(); renameGallerySectionById(${sec.id}, '${escHtml(sec.name)}')">✏️</button>
+          <button class="sidebar-action-btn delete-btn" title="Delete section" onclick="event.stopPropagation(); deleteGallerySectionById(${sec.id}, '${escHtml(sec.name)}')">🗑️</button>
+        ` : ''}
       </div>
     `;
     div.addEventListener('click', () => {
       selectedSectionId = sec.id;
+      document.getElementById('gallery-section').classList.add('in-section');
       renderGallery(galleryData);
     });
     listContainer.appendChild(div);
@@ -255,6 +277,7 @@ function renderGallery(sections) {
   const nameEl = document.getElementById('gallery-current-section-name');
   const metaEl = document.getElementById('gallery-section-meta');
   const uploadBtn = document.getElementById('upload-photo-btn');
+  const renameSecBtn = document.getElementById('rename-section-btn');
   const deleteSecBtn = document.getElementById('delete-section-btn');
   const grid = document.getElementById('gallery-photos-grid');
 
@@ -262,6 +285,7 @@ function renderGallery(sections) {
     nameEl.textContent = 'Select a section';
     metaEl.textContent = 'Choose a folder on the left';
     uploadBtn.classList.add('hidden');
+    if (renameSecBtn) renameSecBtn.classList.add('hidden');
     if (deleteSecBtn) deleteSecBtn.classList.add('hidden');
     grid.innerHTML = '<div class="placeholder">Select a section on the left to see pictures!</div>';
     return;
@@ -270,12 +294,13 @@ function renderGallery(sections) {
   nameEl.textContent = currentSec.name;
   metaEl.textContent = `Created by ${currentSec.createdBy} · ${currentSec.photos.length} photos`;
   uploadBtn.classList.remove('hidden');
-  if (deleteSecBtn) {
-    if (myUsername === 'bang') {
-      deleteSecBtn.classList.remove('hidden');
-    } else {
-      deleteSecBtn.classList.add('hidden');
-    }
+
+  if (myUsername === 'bang') {
+    if (renameSecBtn) renameSecBtn.classList.remove('hidden');
+    if (deleteSecBtn) deleteSecBtn.classList.remove('hidden');
+  } else {
+    if (renameSecBtn) renameSecBtn.classList.add('hidden');
+    if (deleteSecBtn) deleteSecBtn.classList.add('hidden');
   }
 
   grid.innerHTML = '';
@@ -302,6 +327,14 @@ function renderGallery(sections) {
       </div>
     `;
     grid.appendChild(card);
+  });
+}
+
+// Mobile gallery back button
+const mobileGalleryBackBtn = document.getElementById('mobile-gallery-back-btn');
+if (mobileGalleryBackBtn) {
+  mobileGalleryBackBtn.addEventListener('click', () => {
+    document.getElementById('gallery-section').classList.remove('in-section');
   });
 }
 
@@ -363,6 +396,39 @@ window.deleteGalleryPhoto = function(sectionId, photoId) {
   }
 };
 
+// Rename gallery section (Bang only)
+const renameSecBtn = document.getElementById('rename-section-btn');
+if (renameSecBtn) {
+  renameSecBtn.addEventListener('click', () => {
+    if (myUsername !== 'bang') return;
+    const currentSec = galleryData.find(s => s.id === selectedSectionId);
+    if (!currentSec) return;
+    renameGallerySectionById(currentSec.id, currentSec.name);
+  });
+}
+
+window.renameGallerySectionById = function(secId, oldName) {
+  if (myUsername !== 'bang') {
+    alert('Only bang can rename gallery sections!');
+    return;
+  }
+  const newName = prompt('Enter new name for this gallery section:', oldName);
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed) {
+    alert('Section name cannot be empty.');
+    return;
+  }
+
+  socket.emit('rename-gallery-section', { sectionId: secId, newName: trimmed }, (res) => {
+    if (res && res.success) {
+      loadGallery();
+    } else {
+      alert((res && res.message) || 'Error renaming section.');
+    }
+  });
+};
+
 // Delete gallery section (Bang only)
 const deleteSecBtn = document.getElementById('delete-section-btn');
 if (deleteSecBtn) {
@@ -418,14 +484,97 @@ function renderRoomList(rooms) {
         lastMsg = `${r.lastMessage.sender}: ${r.lastMessage.text}`;
       }
     }
-    div.innerHTML = `<div class="room-name">${escHtml(r.name)}</div><div class="room-last-msg">${escHtml(lastMsg)}</div>`;
+    div.innerHTML = `
+      <div class="room-item-content">
+        <div class="room-name">${escHtml(r.name)}</div>
+        <div class="room-last-msg">${escHtml(lastMsg)}</div>
+      </div>
+      <div class="sidebar-item-actions">
+        <button class="sidebar-action-btn" title="Rename room" onclick="event.stopPropagation(); renameChatRoomById(${r.id}, '${escHtml(r.name)}')">✏️</button>
+        <button class="sidebar-action-btn delete-btn" title="Delete room" onclick="event.stopPropagation(); deleteChatRoomById(${r.id}, '${escHtml(r.name)}')">🗑️</button>
+      </div>
+    `;
     div.addEventListener('click', () => openRoom(r.id, r.name, r.members));
     list.appendChild(div);
   });
 }
 
+// Rename & Delete Chat Room Event Handlers
+const renameRoomBtn = document.getElementById('rename-room-btn');
+if (renameRoomBtn) {
+  renameRoomBtn.addEventListener('click', () => {
+    if (!currentRoomId) return;
+    const currentName = document.getElementById('chat-room-name').textContent;
+    renameChatRoomById(currentRoomId, currentName);
+  });
+}
+
+const deleteRoomBtn = document.getElementById('delete-room-btn');
+if (deleteRoomBtn) {
+  deleteRoomBtn.addEventListener('click', () => {
+    if (!currentRoomId) return;
+    const currentName = document.getElementById('chat-room-name').textContent;
+    deleteChatRoomById(currentRoomId, currentName);
+  });
+}
+
+window.renameChatRoomById = function(roomId, oldName) {
+  const newName = prompt('Enter new chat room name:', oldName);
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed) {
+    alert('Room name cannot be empty.');
+    return;
+  }
+
+  socket.emit('rename-room', { roomId, newName: trimmed }, (res) => {
+    if (res && res.success) {
+      if (currentRoomId === roomId) {
+        document.getElementById('chat-room-name').textContent = trimmed;
+      }
+      loadRooms();
+    } else {
+      alert((res && res.message) || 'Error renaming room.');
+    }
+  });
+};
+
+window.deleteChatRoomById = function(roomId, roomName) {
+  if (confirm(`Are you sure you want to delete chat room "${roomName}" and its message history?`)) {
+    socket.emit('delete-room', { roomId }, (res) => {
+      if (res && res.success) {
+        if (currentRoomId === roomId) {
+          currentRoomId = null;
+          document.getElementById('chat-active').classList.add('hidden');
+          document.getElementById('chat-placeholder').classList.remove('hidden');
+        }
+        loadRooms();
+      } else {
+        alert((res && res.message) || 'Error deleting room.');
+      }
+    });
+  }
+};
+
+socket.on('room-renamed', ({ roomId, newName }) => {
+  if (currentRoomId === roomId) {
+    document.getElementById('chat-room-name').textContent = newName;
+  }
+  loadRooms();
+});
+
+socket.on('room-deleted', ({ roomId }) => {
+  if (currentRoomId === roomId) {
+    currentRoomId = null;
+    document.getElementById('chat-active').classList.add('hidden');
+    document.getElementById('chat-placeholder').classList.remove('hidden');
+  }
+  loadRooms();
+});
+
 function openRoom(roomId, name, members) {
   currentRoomId = roomId;
+  document.getElementById('chat-section').classList.add('in-room');
   document.getElementById('chat-placeholder').classList.add('hidden');
   document.getElementById('chat-active').classList.remove('hidden');
   document.getElementById('chat-room-name').textContent = name;
@@ -441,6 +590,14 @@ function openRoom(roomId, name, members) {
     area.innerHTML = '';
     msgs.forEach(m => appendMessage(m));
     area.scrollTop = area.scrollHeight;
+  });
+}
+
+// Mobile chat back button
+const mobileChatBackBtn = document.getElementById('mobile-chat-back-btn');
+if (mobileChatBackBtn) {
+  mobileChatBackBtn.addEventListener('click', () => {
+    document.getElementById('chat-section').classList.remove('in-room');
   });
 }
 
@@ -799,19 +956,26 @@ async function startCall(participants) {
     return;
   }
 
+  unmuteAllRemoteAudios();
+
   const localVideo = document.getElementById('local-video');
   localVideo.srcObject = localStream;
   localVideo.muted = true;
   localVideo.play().catch(e => console.warn(e));
 
   document.getElementById('call-overlay').classList.remove('hidden');
+  document.querySelectorAll('#videos-grid .video-box:not(#local-video-box)').forEach(el => el.remove());
   micEnabled = true;
   camEnabled = true;
 
-  socket.emit('start-call', { participants }, (res) => {
+  const normParticipants = (Array.isArray(participants) ? participants : [])
+    .map(p => typeof p === 'string' ? p.trim().normalize('NFC') : '')
+    .filter(Boolean);
+
+  socket.emit('start-call', { participants: normParticipants }, (res) => {
     if (res.success) {
       currentCallId = res.callId;
-      document.getElementById('call-status').textContent = `In Call — waiting for others...`;
+      document.getElementById('call-status').textContent = `In Call — waiting for others to join...`;
     }
   });
 }
@@ -824,21 +988,27 @@ async function joinCall(callId) {
     return;
   }
 
+  unmuteAllRemoteAudios();
   currentCallId = callId;
+
   const localVideo = document.getElementById('local-video');
   localVideo.srcObject = localStream;
   localVideo.muted = true;
   localVideo.play().catch(e => console.warn(e));
 
   document.getElementById('call-overlay').classList.remove('hidden');
+  document.querySelectorAll('#videos-grid .video-box:not(#local-video-box)').forEach(el => el.remove());
   micEnabled = true;
   camEnabled = true;
 
   socket.emit('join-call', { callId }, (res) => {
     if (res.success) {
       document.getElementById('call-status').textContent = `In Call`;
-      res.peers.forEach(peer => {
-        createPeerConnection(peer, false);
+      (res.peers || []).forEach(peer => {
+        const normPeer = (peer || '').trim().normalize('NFC');
+        if (normPeer && normPeer !== myUsername) {
+          createPeerConnection(normPeer, false);
+        }
       });
     } else {
       alert(res.message || 'Could not join call.');
@@ -847,95 +1017,257 @@ async function joinCall(callId) {
   });
 }
 
+function unmuteAllRemoteAudios() {
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx) {
+      if (!window._hangoutAudioCtx) {
+        window._hangoutAudioCtx = new AudioCtx();
+      }
+      if (window._hangoutAudioCtx.state === 'suspended') {
+        window._hangoutAudioCtx.resume().catch(() => {});
+      }
+    }
+  } catch (e) {}
+
+  document.querySelectorAll('#videos-grid audio').forEach(a => {
+    a.muted = false;
+    a.play().catch(() => {});
+  });
+  document.querySelectorAll('.unmute-overlay-btn').forEach(b => b.classList.add('hidden'));
+}
+
 function createPeerConnection(peerUsername, isInitiator) {
+  peerUsername = (peerUsername || '').trim().normalize('NFC');
+  if (!peerUsername || peerUsername === myUsername) return;
+
+  // Immediately ensure a video/audio box exists in the DOM for this peer with live status
+  let videoBox = document.getElementById('video-' + peerUsername);
+  if (!videoBox) {
+    videoBox = document.createElement('div');
+    videoBox.className = 'video-box';
+    videoBox.id = 'video-' + peerUsername;
+    const initial = peerUsername.charAt(0).toUpperCase();
+    videoBox.innerHTML = `
+      <div class="peer-avatar-placeholder" id="placeholder-${peerUsername}">
+        <div class="peer-avatar-circle">${escHtml(initial)}</div>
+        <div class="peer-avatar-name">${escHtml(peerUsername)}</div>
+        <div class="peer-avatar-hint">Connecting... ⏳</div>
+      </div>
+      <video autoplay playsinline webkit-playsinline muted style="display:none;"></video>
+      <audio autoplay playsinline></audio>
+      <span class="video-label">${escHtml(peerUsername)}</span>
+      <span class="peer-status-badge connecting" id="status-badge-${peerUsername}">Connecting...</span>
+      <button class="unmute-overlay-btn hidden" type="button">🔊 Tap to Hear Audio</button>
+    `;
+    document.getElementById('videos-grid').appendChild(videoBox);
+
+    const unmuteBtn = videoBox.querySelector('.unmute-overlay-btn');
+    unmuteBtn.onclick = (e) => {
+      e.stopPropagation();
+      unmuteAllRemoteAudios();
+    };
+  }
+
   if (peerConnections[peerUsername]) return;
 
   const pc = new RTCPeerConnection(ICE_SERVERS);
   peerConnections[peerUsername] = pc;
-  iceCandidateQueue[peerUsername] = [];
+  if (!iceCandidateQueue[peerUsername]) {
+    iceCandidateQueue[peerUsername] = [];
+  }
 
+  // Add all local audio & video tracks to the connection
   if (localStream) {
     localStream.getTracks().forEach(track => {
       pc.addTrack(track, localStream);
     });
   }
 
+  // Handle incoming remote media tracks (Audio & Video separated for 100% mobile reliability)
   pc.ontrack = (event) => {
-    let videoBox = document.getElementById('video-' + peerUsername);
-    if (!videoBox) {
-      videoBox = document.createElement('div');
-      videoBox.className = 'video-box';
-      videoBox.id = 'video-' + peerUsername;
-      videoBox.innerHTML = `
-        <video autoplay playsinline></video>
-        <span class="video-label">${escHtml(peerUsername)}</span>
-      `;
-      document.getElementById('videos-grid').appendChild(videoBox);
+    const box = document.getElementById('video-' + peerUsername);
+    if (!box) return;
+    const remoteVideo = box.querySelector('video');
+    const remoteAudio = box.querySelector('audio');
+    const placeholder = box.querySelector('.peer-avatar-placeholder');
+    const badge = box.querySelector('.peer-status-badge');
+
+    if (event.track.kind === 'video') {
+      const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+      if (remoteVideo.srcObject !== stream) {
+        remoteVideo.srcObject = stream;
+      }
+      remoteVideo.muted = true; // Video element is muted so iOS/Android autoplay NEVER blocks
+      remoteVideo.style.display = 'block';
+      if (placeholder) placeholder.style.display = 'none';
+      remoteVideo.play().catch(e => console.warn('Remote video play warning:', e));
+    } else if (event.track.kind === 'audio') {
+      const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+      if (remoteAudio.srcObject !== stream) {
+        remoteAudio.srcObject = stream;
+      }
+      remoteAudio.muted = false;
+      remoteAudio.play().catch(() => {
+        console.warn('Remote audio unmuted play prevented by browser policy. Showing unmute button.');
+        const unmuteBtn = box.querySelector('.unmute-overlay-btn');
+        if (unmuteBtn) unmuteBtn.classList.remove('hidden');
+      });
     }
-    const remoteVideo = videoBox.querySelector('video');
-    remoteVideo.srcObject = event.streams[0];
-    remoteVideo.muted = false;
-    remoteVideo.play().catch(e => console.warn('Autoplay prevented:', e));
-    document.getElementById('call-status').textContent = `In Call`;
+
+    if (badge) {
+      badge.textContent = 'Live 🟢';
+      badge.className = 'peer-status-badge connected';
+    }
+    document.getElementById('call-status').textContent = `In Call (${Object.keys(peerConnections).length + 1} users)`;
   };
 
+  // Send ICE candidates to remote peer with robust serialization
   pc.onicecandidate = (event) => {
-    if (event.candidate) {
+    if (event.candidate && event.candidate.candidate) {
+      const candInit = event.candidate.toJSON
+        ? event.candidate.toJSON()
+        : {
+            candidate: event.candidate.candidate,
+            sdpMid: event.candidate.sdpMid,
+            sdpMLineIndex: event.candidate.sdpMLineIndex,
+          };
       socket.emit('webrtc-ice-candidate', {
         callId: currentCallId,
         to: peerUsername,
-        candidate: event.candidate,
+        candidate: candInit,
       });
     }
   };
 
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-      removePeer(peerUsername);
+  // Connection health monitoring & automatic ICE restart
+  function updatePeerStatus(state) {
+    const badge = document.getElementById('status-badge-' + peerUsername);
+    const box = document.getElementById('video-' + peerUsername);
+    const placeholder = box ? box.querySelector('.peer-avatar-placeholder') : null;
+    const hint = placeholder ? placeholder.querySelector('.peer-avatar-hint') : null;
+
+    if (state === 'connected') {
+      if (badge) {
+        badge.textContent = 'Connected 🟢';
+        badge.className = 'peer-status-badge connected';
+      }
+      if (hint) hint.textContent = 'Connected';
+      document.getElementById('call-status').textContent = `In Call (${Object.keys(peerConnections).length + 1} users)`;
+    } else if (state === 'checking' || state === 'connecting') {
+      if (badge) {
+        badge.textContent = 'Connecting 🔄';
+        badge.className = 'peer-status-badge connecting';
+      }
+      if (hint) hint.textContent = 'Connecting... ⏳';
+    } else if (state === 'failed') {
+      if (badge) {
+        badge.textContent = 'Failed 🔴 (Retrying)';
+        badge.className = 'peer-status-badge failed';
+      }
+      if (hint) hint.textContent = 'Connection failed, retrying...';
+      // Trigger ICE restart if initiator
+      if (isInitiator && typeof pc.createOffer === 'function') {
+        pc.createOffer({ iceRestart: true })
+          .then(offer => pc.setLocalDescription(offer))
+          .then(() => {
+            if (pc.localDescription) {
+              socket.emit('webrtc-offer', {
+                callId: currentCallId,
+                to: peerUsername,
+                offer: { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
+              });
+            }
+          })
+          .catch(e => console.warn('ICE restart offer failed:', e));
+      }
+    } else if (state === 'disconnected') {
+      if (badge) {
+        badge.textContent = 'Reconnecting ⚠️';
+        badge.className = 'peer-status-badge reconnecting';
+      }
+    }
+  }
+
+  pc.onconnectionstatechange = () => updatePeerStatus(pc.connectionState);
+  pc.oniceconnectionstatechange = () => {
+    if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'connected') {
+      updatePeerStatus(pc.iceConnectionState);
     }
   };
 
+  // If we are the designated initiator, create and send the offer
   if (isInitiator) {
     pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true })
-      .then(offer => pc.setLocalDescription(offer))
+      .then(offer => {
+        if (pc.signalingState !== 'stable') return;
+        return pc.setLocalDescription(offer);
+      })
       .then(() => {
-        socket.emit('webrtc-offer', {
-          callId: currentCallId,
-          to: peerUsername,
-          offer: pc.localDescription,
-        });
+        if (pc.localDescription) {
+          socket.emit('webrtc-offer', {
+            callId: currentCallId,
+            to: peerUsername,
+            offer: { type: pc.localDescription.type, sdp: pc.localDescription.sdp },
+          });
+        }
       })
       .catch(err => console.error('Error creating offer:', err));
   }
 }
 
+// Receive offer from peer
 socket.on('webrtc-offer', async ({ callId, from, offer }) => {
+  from = (from || '').trim().normalize('NFC');
   createPeerConnection(from, false);
   const pc = peerConnections[from];
+  if (!pc) return;
+
   try {
+    if (pc.signalingState === 'have-local-offer') {
+      await pc.setLocalDescription({ type: 'rollback' });
+    }
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+    // Flush any ICE candidates that arrived before the remote description was set
     if (iceCandidateQueue[from] && iceCandidateQueue[from].length > 0) {
       for (const cand of iceCandidateQueue[from]) {
-        await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => console.warn(e));
+        try {
+          await pc.addIceCandidate(cand);
+        } catch (e) {
+          console.warn('Candidate flush warning:', e);
+        }
       }
       iceCandidateQueue[from] = [];
     }
+
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    socket.emit('webrtc-answer', { callId, to: from, answer: pc.localDescription });
+    socket.emit('webrtc-answer', {
+      callId,
+      to: from,
+      answer: { type: pc.localDescription.type, sdp: pc.localDescription.sdp }
+    });
   } catch (err) {
     console.error('Error handling WebRTC offer:', err);
   }
 });
 
+// Receive answer from peer
 socket.on('webrtc-answer', async ({ from, answer }) => {
+  from = (from || '').trim().normalize('NFC');
   const pc = peerConnections[from];
-  if (pc) {
+  if (pc && pc.signalingState === 'have-local-offer') {
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(answer));
+
       if (iceCandidateQueue[from] && iceCandidateQueue[from].length > 0) {
         for (const cand of iceCandidateQueue[from]) {
-          await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(e => console.warn(e));
+          try {
+            await pc.addIceCandidate(cand);
+          } catch (e) {
+            console.warn('Candidate flush warning:', e);
+          }
         }
         iceCandidateQueue[from] = [];
       }
@@ -945,11 +1277,14 @@ socket.on('webrtc-answer', async ({ from, answer }) => {
   }
 });
 
+// Receive ICE candidate from peer
 socket.on('webrtc-ice-candidate', async ({ from, candidate }) => {
+  from = (from || '').trim().normalize('NFC');
+  if (!candidate || !candidate.candidate) return;
   const pc = peerConnections[from];
   if (pc && pc.remoteDescription && pc.remoteDescription.type) {
     try {
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      await pc.addIceCandidate(candidate);
     } catch (err) {
       console.warn('Error adding ICE candidate:', err);
     }
@@ -959,19 +1294,32 @@ socket.on('webrtc-ice-candidate', async ({ from, candidate }) => {
   }
 });
 
+// When a new peer joins the call, existing peers initiate the connection
 socket.on('peer-joined', ({ callId, username }) => {
-  if (callId === currentCallId) {
+  username = (username || '').trim().normalize('NFC');
+  if (callId === currentCallId && username !== myUsername) {
     createPeerConnection(username, true);
   }
 });
 
+// When a peer leaves the call
 socket.on('peer-left', ({ callId, username }) => {
+  username = (username || '').trim().normalize('NFC');
   if (callId === currentCallId) {
     removePeer(username);
   }
 });
 
+// Tap anywhere on the call screen to ensure all audio tracks are unmuted and playing
+const callOverlay = document.getElementById('call-overlay');
+if (callOverlay) {
+  callOverlay.addEventListener('click', () => {
+    unmuteAllRemoteAudios();
+  });
+}
+
 function removePeer(username) {
+  username = (username || '').trim().normalize('NFC');
   if (peerConnections[username]) {
     peerConnections[username].close();
     delete peerConnections[username];
@@ -1114,6 +1462,8 @@ function stopActiveGame() {
     activeGameCleanup();
     activeGameCleanup = null;
   }
+  const mobileControls = document.getElementById('runner-mobile-controls');
+  if (mobileControls) mobileControls.classList.add('hidden');
 }
 
 document.querySelectorAll('.play-btn').forEach(btn => {
@@ -1173,22 +1523,29 @@ document.getElementById('restart-game-top-btn').addEventListener('click', () => 
 
 // Game Over Popup with Ranking Update
 function showGameOver(score, customTitle = 'Game Over', customMsg = null) {
-  document.getElementById('game-over-title').textContent = customTitle;
-  document.getElementById('final-score').textContent = score;
-  if (customMsg) {
-    document.getElementById('game-over-msg').innerHTML = customMsg;
-  } else {
-    document.getElementById('game-over-msg').innerHTML = `Final Score: <span id="final-score">${score}</span>`;
+  const titleEl = document.getElementById('game-over-title');
+  if (titleEl) titleEl.textContent = customTitle;
+
+  const msgEl = document.getElementById('game-over-msg');
+  if (msgEl) {
+    if (customMsg) {
+      msgEl.innerHTML = customMsg;
+    } else {
+      msgEl.innerHTML = `Final Score: <strong style="color:#4e8cff;font-size:1.4rem;">${score}</strong>`;
+    }
   }
 
+  const finalScoreEl = document.getElementById('final-score');
+  if (finalScoreEl) finalScoreEl.textContent = score;
+
   const rankBox = document.getElementById('game-over-rank');
-  rankBox.classList.add('hidden');
+  if (rankBox) rankBox.classList.add('hidden');
 
   // Submit to leaderboard immediately so BOTH buttons ("One More Round" & "Back to Arcade") save the ranking!
   // Only submit if score > 0 (score <= 0 is not eligible for leaderboard)
   if (currentGame && typeof score === 'number' && score > 0) {
     socket.emit('submit-score', { game: currentGame, score }, (res) => {
-      if (res && res.success) {
+      if (res && res.success && rankBox) {
         if (res.rank && res.rank <= 5) {
           rankBox.innerHTML = `🏆 <strong>New High Score!</strong> You're Rank #${res.rank}!`;
           rankBox.classList.remove('hidden');
@@ -1204,12 +1561,13 @@ function showGameOver(score, customTitle = 'Game Over', customMsg = null) {
         loadLeaderboards();
       }
     });
-  } else {
+  } else if (rankBox) {
     rankBox.innerHTML = `<span style="color:#8899aa;font-size:13px;">Score: 0 — Not ranked. Keep playing to get on the leaderboard!</span>`;
     rankBox.classList.remove('hidden');
   }
 
-  document.getElementById('game-over-overlay').classList.remove('hidden');
+  const overlay = document.getElementById('game-over-overlay');
+  if (overlay) overlay.classList.remove('hidden');
 }
 
 // ============================================================
@@ -1654,7 +2012,8 @@ function startFlappyGame() {
       gameLoop = null;
     }
     playSound('hit');
-    showGameOver(score);
+    const msg = score === 1 ? 'You passed <strong>1</strong> pipe!' : `You passed <strong>${score}</strong> pipes!`;
+    showGameOver(score, '💥 Crashed!', msg);
   }
 
   function update() {
@@ -1966,10 +2325,25 @@ function startSubwayRunnerGame() {
   canvas.addEventListener('touchstart', onTouchStart, { passive: true });
   canvas.addEventListener('touchend', onTouchEnd, { passive: true });
 
+  const mobileControls = document.getElementById('runner-mobile-controls');
+  if (mobileControls) {
+    mobileControls.classList.remove('hidden');
+    const onCtrl = (fn) => (e) => { e.preventDefault(); fn(); };
+    document.getElementById('ctrl-left').ontouchstart = onCtrl(moveLeft);
+    document.getElementById('ctrl-left').onmousedown = onCtrl(moveLeft);
+    document.getElementById('ctrl-right').ontouchstart = onCtrl(moveRight);
+    document.getElementById('ctrl-right').onmousedown = onCtrl(moveRight);
+    document.getElementById('ctrl-up').ontouchstart = onCtrl(jump);
+    document.getElementById('ctrl-up').onmousedown = onCtrl(jump);
+    document.getElementById('ctrl-down').ontouchstart = onCtrl(slide);
+    document.getElementById('ctrl-down').onmousedown = onCtrl(slide);
+  }
+
   activeGameCleanup = () => {
     window.removeEventListener('keydown', onKeyDown);
     canvas.removeEventListener('touchstart', onTouchStart);
     canvas.removeEventListener('touchend', onTouchEnd);
+    if (mobileControls) mobileControls.classList.add('hidden');
   };
 
   function spawnWorldObjects() {
@@ -2040,6 +2414,10 @@ function startSubwayRunnerGame() {
 
         if (!safe) {
           gameActive = false;
+          if (gameLoop) {
+            cancelAnimationFrame(gameLoop);
+            gameLoop = null;
+          }
           playSound('hit');
           showGameOver(score, '💥 Crashed!', `You ran <strong>${Math.floor(distance/5)}m</strong> and collected <strong>${coinsCount}</strong> coins!`);
           return;
